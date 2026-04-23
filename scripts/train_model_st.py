@@ -127,32 +127,66 @@ def load_records(dataset_json: Path) -> list[dict[str, Any]]:
 
 
 def split_by_title(records: list[dict[str, Any]], seed: int) -> dict[str, list[dict[str, Any]]]:
+    """Group-aware split with 8:1:1 ratio and zero title leakage.
+
+    All versions of the same song title are assigned to one split only.
+    The 8:1:1 target is applied on record counts (not title counts).
+    """
     groups: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for rec in records:
         groups[str(rec["title"])].append(rec)
 
-    titles = list(groups.keys())
     rng = random.Random(seed)
-    rng.shuffle(titles)
+    grouped = list(groups.items())
+    rng.shuffle(grouped)
+    grouped.sort(key=lambda item: len(item[1]), reverse=True)
 
-    n_total = len(titles)
-    n_train = int(n_total * 0.8)
-    n_val = int(n_total * 0.1)
+    total_records = len(records)
+    targets = {
+        "train": int(round(total_records * 0.8)),
+        "val": int(round(total_records * 0.1)),
+    }
+    targets["test"] = total_records - targets["train"] - targets["val"]
 
-    train_titles = set(titles[:n_train])
-    val_titles = set(titles[n_train : n_train + n_val])
-    test_titles = set(titles[n_train + n_val :])
+    splits: dict[str, list[dict[str, Any]]] = {"train": [], "val": [], "test": []}
+    split_counts = {"train": 0, "val": 0, "test": 0}
 
-    train_records, val_records, test_records = [], [], []
-    for title, recs in groups.items():
-        if title in train_titles:
-            train_records.extend(recs)
-        elif title in val_titles:
-            val_records.extend(recs)
-        elif title in test_titles:
-            test_records.extend(recs)
+    for _title, recs in grouped:
+        size = len(recs)
+        gaps = {k: targets[k] - split_counts[k] for k in ("train", "val", "test")}
+        positive_gap_splits = [k for k in ("train", "val", "test") if gaps[k] > 0]
 
-    return {"train": train_records, "val": val_records, "test": test_records}
+        if positive_gap_splits:
+            # Prefer the split with the largest remaining gap.
+            positive_gap_splits.sort(
+                key=lambda k: (gaps[k], -split_counts[k] / max(targets[k], 1)),
+                reverse=True,
+            )
+            chosen = positive_gap_splits[0]
+        else:
+            # All splits have reached targets; minimize post-assignment overflow.
+            chosen = min(
+                ("train", "val", "test"),
+                key=lambda k: abs((split_counts[k] + size) - targets[k]),
+            )
+
+        splits[chosen].extend(recs)
+        split_counts[chosen] += size
+
+    return splits
+
+
+def assert_no_title_leakage(splits: dict[str, list[dict[str, Any]]]) -> None:
+    title_sets = {
+        name: {str(item["title"]) for item in items}
+        for name, items in splits.items()
+    }
+    if title_sets["train"] & title_sets["val"]:
+        raise RuntimeError("Title leakage detected between train and val")
+    if title_sets["train"] & title_sets["test"]:
+        raise RuntimeError("Title leakage detected between train and test")
+    if title_sets["val"] & title_sets["test"]:
+        raise RuntimeError("Title leakage detected between val and test")
 
 
 def to_label_dict(records: list[dict[str, Any]]) -> dict[str, list[float]]:
@@ -281,6 +315,7 @@ def main() -> None:
 
     records = load_records(dataset_json)
     splits = split_by_title(records, seed=args.seed)
+    assert_no_title_leakage(splits)
 
     validate_feature_shapes(records, feature_dir, dim_embed=args.dim_embed)
 
