@@ -1,0 +1,15 @@
+# Core numeric
+numpy==1.26.4
+scipy==1.12.0
+
+# Deep learning
+torch==2.4.1
+
+# Audio feature extraction
+librosa==0.10.2.post1
+soundfile==0.12.1
+
+# Data I/O and utilities
+pandas==2.2.2
+openpyxl==3.1.5
+tqdm==4.66.5
