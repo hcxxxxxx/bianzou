@@ -70,6 +70,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--peak-threshold", type=float, default=0.05, help="Local-max threshold")
 
     parser.add_argument("--device", default="auto", choices=["auto", "cpu", "cuda", "mps"])
+    parser.add_argument("--disable-cudnn", action="store_true", help="Disable cuDNN for debugging/stability")
     parser.add_argument("--run-dir", default="", help="Optional output run directory")
     return parser.parse_args()
 
@@ -335,6 +336,9 @@ class SACNFolkModel(nn.Module):
         x = x_tf.unsqueeze(0).unsqueeze(0)  # (1, 1, T, F)
         emb = self.embedding(x)  # (1, T, sigma)
         agg = self._aggregate_windows(emb)  # (1, T/w, w*sigma)
+        if agg.shape[1] == 0:
+            # Guard against extremely short inputs (< one aggregation window).
+            return torch.empty(0, device=x_tf.device, dtype=x_tf.dtype)
         out, _ = self.lstm(agg)
         logits = self.classifier(out).squeeze(-1).squeeze(0)  # (T/w,)
         return logits
@@ -455,12 +459,16 @@ def run_epoch_train(
     optimizer.zero_grad(set_to_none=True)
     total_loss = 0.0
     steps = 0
+    skipped = 0
 
     for step, batch in enumerate(loader, start=1):
         x = batch["x"].to(device)
         y = batch["y"].to(device)
         logits = model(x)
         n = min(logits.numel(), y.numel())
+        if n <= 0:
+            skipped += 1
+            continue
         logits = logits[:n]
         y = y[:n]
         loss = criterion(logits, y)
@@ -474,7 +482,7 @@ def run_epoch_train(
         total_loss += float(loss.item())
         steps += 1
 
-    return {"loss": total_loss / max(1, steps), "num_songs": float(steps)}
+    return {"loss": total_loss / max(1, steps), "num_songs": float(steps), "skipped_songs": float(skipped)}
 
 
 @torch.no_grad()
@@ -491,6 +499,7 @@ def run_epoch_eval(
     model.train(False)
     total_loss = 0.0
     steps = 0
+    skipped = 0
     sum_p3 = sum_r3 = sum_f3 = 0.0
     sum_p05 = sum_r05 = sum_f05 = 0.0
     peak_count_total = 0
@@ -501,6 +510,9 @@ def run_epoch_eval(
         y = batch["y"].to(device)
         logits = model(x)
         n = min(logits.numel(), y.numel())
+        if n <= 0:
+            skipped += 1
+            continue
         logits = logits[:n]
         y = y[:n]
         loss = criterion(logits, y)
@@ -553,6 +565,7 @@ def run_epoch_eval(
     return {
         "loss": total_loss / max(1, steps),
         "num_songs": float(steps),
+        "skipped_songs": float(skipped),
         "avg_pred_peaks": avg_pred_peaks,
         "avg_max_prob": avg_max_prob,
         "hr3p": p3,
@@ -580,6 +593,10 @@ def main() -> None:
     run_dir.mkdir(parents=True, exist_ok=True)
 
     seed_everything(args.seed)
+    if args.disable_cudnn:
+        torch.backends.cudnn.enabled = False
+    else:
+        torch.backends.cudnn.benchmark = True
     device = pick_device(args.device)
 
     records = load_records(dataset_json)
@@ -656,6 +673,7 @@ def main() -> None:
     print("=== SA-CNFolk Training Start ===")
     print(f"device: {device}")
     print(f"run_dir: {run_dir}")
+    print(f"cudnn_enabled: {torch.backends.cudnn.enabled}")
     print(f"split: train={split_summary['n_train']} val={split_summary['n_val']} test={split_summary['n_test']}")
 
     for epoch in range(1, args.epochs + 1):
@@ -694,7 +712,9 @@ def main() -> None:
             f"[Epoch {epoch:03d}] "
             f"lr={lr:.6g} "
             f"train_songs={int(train_metrics['num_songs'])} "
+            f"train_skipped={int(train_metrics['skipped_songs'])} "
             f"val_songs={int(val_metrics['num_songs'])} "
+            f"val_skipped={int(val_metrics['skipped_songs'])} "
             f"epoch_time={epoch_seconds:.2f}s | "
             f"train_loss={train_metrics['loss']:.4f} | "
             f"val_loss={val_metrics['loss']:.4f} "
