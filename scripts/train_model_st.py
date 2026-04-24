@@ -2,9 +2,7 @@
 """Train model_st.AllInOneSectionOnly with batch_size=1 on songs_dataset.json.
 
 This script assumes feature files are frame sequences saved as:
-  <feature_dir>/<filename>.npy with shape (dim_embed, T)
-
-Default dim_embed=24 is compatible with `scripts/extract_chroma24_features.py`.
+  <feature_dir>/<filename>.npy with shape (n_mels, T)
 """
 
 from __future__ import annotations
@@ -23,14 +21,14 @@ from typing import Any
 import numpy as np
 import torch
 import torch.nn as nn
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Dataset
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Train model_st with batch_size=1.")
     parser.add_argument("--root", default=".", help="Project root")
     parser.add_argument("--dataset-json", default="songs_dataset.json", help="Dataset JSON path")
-    parser.add_argument("--feature-dir", default="features_chroma24", help="Feature directory")
+    parser.add_argument("--feature-dir", default="features_mel81", help="Feature directory")
     parser.add_argument("--epochs", type=int, default=60)
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--weight-decay", type=float, default=1e-4)
@@ -41,7 +39,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=42)
 
     parser.add_argument("--fole-time", type=float, default=1.0)
-    parser.add_argument("--dim-embed", type=int, default=24)
+    parser.add_argument("--dim-embed", type=int, default=81)
     parser.add_argument("--lstm-hidden-size", type=int, default=128)
     parser.add_argument("--lstm-num-layers", type=int, default=2)
     parser.add_argument("--tolerance", type=float, default=3.0)
@@ -116,6 +114,74 @@ class Head(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.proj(x)
+
+
+class FeatureDataset(Dataset):
+    """Load per-song features and build folded boundary labels."""
+
+    def __init__(
+        self,
+        label_dict: dict[str, list[float]],
+        feature_dir: str,
+        sr: int = 44100,
+        hop_length: int = 512,
+        tolerance: float = 3.0,
+        fole_time: float = 1.0,
+    ):
+        self.file_list = list(label_dict.keys())
+        self.label_dict = label_dict
+        self.feature_dir = feature_dir
+        self.sr = sr
+        self.hop_length = hop_length
+        self.tolerance = tolerance
+        self.fole_time = fole_time
+
+    def __len__(self) -> int:
+        return len(self.file_list)
+
+    def generate_frame_labels(self, time_points: list[float], n_frames: int) -> np.ndarray:
+        frame_labels = np.zeros(n_frames, dtype=np.float32)
+        frame_duration = self.hop_length / self.sr
+        delta = int(self.tolerance / frame_duration)
+
+        for t in time_points:
+            center = int(t / frame_duration)
+            start = max(center - delta, 0)
+            end = min(center + delta + 1, n_frames)
+            frame_labels[start:end] = 1.0
+        return frame_labels
+
+    @staticmethod
+    def fold_sequence(seq: np.ndarray, fold_size: int) -> np.ndarray:
+        n = seq.shape[0]
+        n_folds = n // fold_size
+        seq = seq[: n_folds * fold_size]
+        seq = seq.reshape(n_folds, fold_size, -1).mean(axis=1)
+        return seq
+
+    def __getitem__(self, idx: int):
+        file_key = self.file_list[idx]
+        file_id = file_key.replace(".wav", "")
+        feature_path = Path(self.feature_dir) / f"{file_id}.npy"
+        feat = np.load(feature_path)  # expected: (F, T)
+        if feat.ndim != 2:
+            raise ValueError(f"feature must be 2D, got {feat.ndim}D: {feature_path}")
+
+        time_points = self.label_dict[file_key]
+        n_frames = int(feat.shape[1])
+        labels = self.generate_frame_labels(time_points, n_frames)
+
+        # Convert feature to (T, F) for model input.
+        feat = feat.T.astype(np.float32)
+        frame_duration = self.hop_length / self.sr
+        fold_frames = int(self.fole_time / frame_duration)
+        folded_labels = self.fold_sequence(labels[:, None], fold_frames).squeeze()
+
+        return (
+            torch.tensor(feat, dtype=torch.float32),
+            torch.tensor(folded_labels, dtype=torch.float32),
+            time_points,
+        )
 
 
 def load_records(dataset_json: Path) -> list[dict[str, Any]]:
@@ -326,25 +392,25 @@ def main() -> None:
     val_label_dict = to_label_dict(splits["val"])
     test_label_dict = to_label_dict(splits["test"])
 
-    train_dataset = model_st.ChromaDataset(
+    train_dataset = FeatureDataset(
         label_dict=train_label_dict,
-        chroma_dir=feature_dir.as_posix(),
+        feature_dir=feature_dir.as_posix(),
         sr=44100,
         hop_length=512,
         tolerance=args.tolerance,
         fole_time=args.fole_time,
     )
-    val_dataset = model_st.ChromaDataset(
+    val_dataset = FeatureDataset(
         label_dict=val_label_dict,
-        chroma_dir=feature_dir.as_posix(),
+        feature_dir=feature_dir.as_posix(),
         sr=44100,
         hop_length=512,
         tolerance=args.tolerance,
         fole_time=args.fole_time,
     )
-    test_dataset = model_st.ChromaDataset(
+    test_dataset = FeatureDataset(
         label_dict=test_label_dict,
-        chroma_dir=feature_dir.as_posix(),
+        feature_dir=feature_dir.as_posix(),
         sr=44100,
         hop_length=512,
         tolerance=args.tolerance,
