@@ -66,8 +66,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--overwrite-mel", action="store_true", help="Re-extract Mel even if files exist")
 
     # Post-processing:
-    parser.add_argument("--smooth-kernel", type=int, default=5, help="Moving-average kernel for probability smoothing")
-    parser.add_argument("--peak-threshold", type=float, default=0.20, help="Local maxima threshold")
+    parser.add_argument("--smooth-kernel", type=int, default=9, help="Local-max filter size")
+    parser.add_argument("--peak-threshold", type=float, default=0.05, help="Local-max threshold")
 
     parser.add_argument("--device", default="auto", choices=["auto", "cpu", "cuda", "mps"])
     parser.add_argument("--run-dir", default="", help="Optional output run directory")
@@ -340,72 +340,107 @@ class SACNFolkModel(nn.Module):
         return logits
 
 
-def moving_average_1d(x: np.ndarray, k: int) -> np.ndarray:
-    if k <= 1:
-        return x
-    if k % 2 == 0:
-        k += 1
-    kernel = np.ones(k, dtype=np.float32) / float(k)
-    return np.convolve(x, kernel, mode="same")
+def local_maxima(probs: torch.Tensor | np.ndarray, filter_size: int = 9, step: int = 1) -> tuple[np.ndarray, np.ndarray]:
+    if isinstance(probs, torch.Tensor):
+        arr = probs.detach().cpu().numpy().astype(np.float32).reshape(-1)
+    else:
+        arr = np.asarray(probs, dtype=np.float32).reshape(-1)
+
+    if arr.size == 0:
+        return np.zeros(0, dtype=np.float32), np.zeros(0, dtype=np.int64)
+
+    filter_size = max(int(filter_size), 1)
+    if filter_size % 2 == 0:
+        filter_size += 1
+    half = filter_size // 2
+    step = max(int(step), 1)
+
+    out = np.zeros_like(arr, dtype=np.float32)
+    for i in range(0, arr.size, step):
+        left = max(0, i - half)
+        right = min(arr.size, i + half + 1)
+        if arr[i] >= np.max(arr[left:right]):
+            out[i] = arr[i]
+    idx = np.where(out > 0)[0].astype(np.int64)
+    return out, idx
 
 
-def local_max_peaks(prob: np.ndarray, threshold: float) -> list[int]:
-    if prob.size == 0:
-        return []
-    peaks: list[int] = []
-    for i in range(prob.size):
-        left = prob[i - 1] if i > 0 else -np.inf
-        right = prob[i + 1] if i < prob.size - 1 else -np.inf
-        if prob[i] >= left and prob[i] >= right and prob[i] >= threshold:
-            peaks.append(i)
-    return peaks
+def tensor_to_time(pred_mask: torch.Tensor | np.ndarray, sr: int, hop_length: int) -> list[float]:
+    if isinstance(pred_mask, torch.Tensor):
+        mask = pred_mask.detach().cpu().numpy().astype(bool).reshape(-1)
+    else:
+        mask = np.asarray(pred_mask).astype(bool).reshape(-1)
+    idx = np.where(mask)[0]
+    return [float(i * hop_length / sr) for i in idx]
 
 
-def folded_idx_to_seconds(idxs: list[int], w_seconds: float) -> list[float]:
-    # Use window center as prediction timestamp.
-    return [float(i * w_seconds + 0.5 * w_seconds) for i in idxs]
+def process_prob_sections(
+    probs: torch.Tensor,
+    outputs: torch.Tensor,
+    labels: torch.Tensor,
+    loss_func: nn.Module,
+    sr: int,
+    hop_length: int,
+    filter_size: int = 9,
+    step: int = 1,
+    threshold: float = 0.05,
+) -> list[float]:
+    del outputs, labels, loss_func  # kept for API compatibility with author code
+    prob_sections, _ = local_maxima(probs, filter_size=filter_size, step=step)
+    _valid_probs = prob_sections[prob_sections > 0]
+
+    # Keep author's hard override behavior.
+    threshold = 0.0001
+    pred_mask = prob_sections >= threshold
+    pred_times = tensor_to_time(pred_mask, sr=sr, hop_length=hop_length)
+    return pred_times
 
 
-def match_with_tolerance(pred: list[float], gt: list[float], tol: float) -> tuple[int, int, int]:
-    pred_sorted = sorted(pred)
-    gt_sorted = sorted(gt)
-    used = [False] * len(gt_sorted)
-    tp = 0
-    for p in pred_sorted:
-        best_j = -1
-        best_d = 1e18
-        for j, g in enumerate(gt_sorted):
-            if used[j]:
+def match_predictions(pred_times: list[float], true_times: list[float], tolerance: float = 0.5) -> tuple[float, float, float]:
+    matched = 0
+    used: set[int] = set()
+    for t_pred in pred_times:
+        for i, t_true in enumerate(true_times):
+            if i in used:
                 continue
-            d = abs(p - g)
-            if d <= tol and d < best_d:
-                best_d = d
-                best_j = j
-        if best_j >= 0:
-            used[best_j] = True
-            tp += 1
-    fp = len(pred_sorted) - tp
-    fn = len(gt_sorted) - tp
-    return tp, fp, fn
+            if abs(t_pred - t_true) <= tolerance:
+                matched += 1
+                used.add(i)
+                break
+    precision = matched / len(pred_times) if pred_times else 0.0
+    recall = matched / len(true_times) if true_times else 0.0
+    f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0.0
+    return precision, recall, f1
 
 
-def prf(tp: int, fp: int, fn: int) -> tuple[float, float, float]:
-    p = tp / (tp + fp + 1e-8)
-    r = tp / (tp + fn + 1e-8)
-    f = 2 * p * r / (p + r + 1e-8)
-    return p, r, f
+def match_predictions_segment(pre_section: list[float], true_times: list[float], tolerance: float = 3.0) -> tuple[float, float, float]:
+    true_section = true_times
+    true_section = [[true_section[i], true_section[i + 1]] for i in range(len(true_section) - 1)]
 
+    if len(pre_section) > 1:
+        pre_section = [[pre_section[i], pre_section[i + 1]] for i in range(len(pre_section) - 1)]
+        try:
+            import mir_eval
 
-def estimate_pos_weight(dataset: Dataset) -> float:
-    pos = 0
-    neg = 0
-    for i in range(len(dataset)):
-        y = dataset[i]["y"].numpy()
-        pos += int((y > 0).sum())
-        neg += int((y <= 0).sum())
-    if pos <= 0:
-        return 1.0
-    return float(neg / max(pos, 1))
+            detection_results = mir_eval.segment.detection(
+                np.array(true_section),
+                np.array(pre_section),
+                window=tolerance,
+                beta=1.0,
+                trim=False,
+            )
+            precision = float(detection_results[0])
+            recall = float(detection_results[1])
+            f1 = float(detection_results[2])
+        except ModuleNotFoundError:
+            # Fallback if mir_eval is unavailable.
+            pred_boundary = [x[0] for x in pre_section]
+            precision, recall, f1 = match_predictions(pred_boundary, true_times, tolerance=tolerance)
+    else:
+        precision = 0.0
+        recall = 0.0
+        f1 = 0.0
+    return precision, recall, f1
 
 
 def run_epoch_train(
@@ -451,12 +486,13 @@ def run_epoch_eval(
     w_seconds: float,
     smooth_kernel: int,
     peak_threshold: float,
+    sr: int,
 ) -> dict[str, float]:
     model.train(False)
     total_loss = 0.0
     steps = 0
-    tp3 = fp3 = fn3 = 0
-    tp05 = fp05 = fn05 = 0
+    sum_p3 = sum_r3 = sum_f3 = 0.0
+    sum_p05 = sum_r05 = sum_f05 = 0.0
     peak_count_total = 0
     max_prob_total = 0.0
 
@@ -471,25 +507,47 @@ def run_epoch_eval(
         total_loss += float(loss.item())
         steps += 1
 
-        probs = torch.sigmoid(logits).detach().cpu().numpy().astype(np.float32)
-        probs = moving_average_1d(probs, k=smooth_kernel)
-        peak_idx = local_max_peaks(probs, threshold=peak_threshold)
-        peak_count_total += len(peak_idx)
-        max_prob_total += float(probs.max()) if probs.size > 0 else 0.0
-        pred_times = folded_idx_to_seconds(peak_idx, w_seconds=w_seconds)
+        probs = torch.sigmoid(logits)
+        # Output is at aggregated resolution (one step per w_seconds),
+        # so convert index->time with effective hop = sr * w_seconds.
+        effective_hop = max(1, int(round(sr * w_seconds)))
+        pred_times = process_prob_sections(
+            probs,
+            logits,
+            y,
+            criterion,
+            sr=sr,
+            hop_length=effective_hop,
+            filter_size=smooth_kernel,
+            step=1,
+            threshold=peak_threshold,
+        )
 
-        gt_times = [float(t) for t in batch["boundary_times"] if float(t) > 1e-8]
-        tp, fp, fn = match_with_tolerance(pred_times, gt_times, tol=3.0)
-        tp3 += tp
-        fp3 += fp
-        fn3 += fn
-        tp, fp, fn = match_with_tolerance(pred_times, gt_times, tol=0.5)
-        tp05 += tp
-        fp05 += fp
-        fn05 += fn
+        probs_np = probs.detach().cpu().numpy().astype(np.float32).reshape(-1)
+        peak_count_total += len(pred_times)
+        max_prob_total += float(probs_np.max()) if probs_np.size > 0 else 0.0
 
-    p3, r3, f3 = prf(tp3, fp3, fn3)
-    p05, r05, f05 = prf(tp05, fp05, fn05)
+        true_times_full = [float(t) for t in batch["boundary_times"]]
+        true_times_point = [t for t in true_times_full if t > 1e-8]
+
+        p05, r05, f05 = match_predictions(pred_times, true_times_point, tolerance=0.5)
+        # Segment-level detection expects full boundary list. Prepend 0.0 for stability.
+        pre_for_seg = sorted(set([0.0] + pred_times))
+        p3, r3, f3 = match_predictions_segment(pre_for_seg, true_times_full, tolerance=3.0)
+
+        sum_p3 += p3
+        sum_r3 += r3
+        sum_f3 += f3
+        sum_p05 += p05
+        sum_r05 += r05
+        sum_f05 += f05
+
+    p3 = sum_p3 / max(1, steps)
+    r3 = sum_r3 / max(1, steps)
+    f3 = sum_f3 / max(1, steps)
+    p05 = sum_p05 / max(1, steps)
+    r05 = sum_r05 / max(1, steps)
+    f05 = sum_f05 / max(1, steps)
     avg_pred_peaks = peak_count_total / max(1, steps)
     avg_max_prob = max_prob_total / max(1, steps)
     return {
@@ -567,8 +625,7 @@ def main() -> None:
         sr=args.sr,
         hop_length=args.hop_length,
     ).to(device)
-    pos_weight = estimate_pos_weight(train_ds)
-    criterion = nn.BCEWithLogitsLoss(pos_weight=torch.tensor(pos_weight, dtype=torch.float32, device=device))
+    criterion = nn.BCEWithLogitsLoss()
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
 
     split_summary = {
@@ -587,7 +644,6 @@ def main() -> None:
             "args": vars(args),
             "device": str(device),
             "split_summary": split_summary,
-            "pos_weight": pos_weight,
         },
     )
 
@@ -601,7 +657,6 @@ def main() -> None:
     print(f"device: {device}")
     print(f"run_dir: {run_dir}")
     print(f"split: train={split_summary['n_train']} val={split_summary['n_val']} test={split_summary['n_test']}")
-    print(f"pos_weight: {pos_weight:.4f}")
 
     for epoch in range(1, args.epochs + 1):
         epoch_t0 = time.perf_counter()
@@ -622,6 +677,7 @@ def main() -> None:
             w_seconds=args.w_seconds,
             smooth_kernel=args.smooth_kernel,
             peak_threshold=args.peak_threshold,
+            sr=args.sr,
         )
         epoch_seconds = time.perf_counter() - epoch_t0
 
@@ -690,6 +746,7 @@ def main() -> None:
         w_seconds=args.w_seconds,
         smooth_kernel=args.smooth_kernel,
         peak_threshold=args.peak_threshold,
+        sr=args.sr,
     )
     save_json(
         run_dir / "final_report.json",
