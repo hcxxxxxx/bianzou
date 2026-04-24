@@ -67,7 +67,7 @@ def parse_args() -> argparse.Namespace:
 
     # Post-processing:
     parser.add_argument("--smooth-kernel", type=int, default=5, help="Moving-average kernel for probability smoothing")
-    parser.add_argument("--peak-threshold", type=float, default=0.35, help="Local maxima threshold")
+    parser.add_argument("--peak-threshold", type=float, default=0.20, help="Local maxima threshold")
 
     parser.add_argument("--device", default="auto", choices=["auto", "cpu", "cuda", "mps"])
     parser.add_argument("--run-dir", default="", help="Optional output run directory")
@@ -396,6 +396,18 @@ def prf(tp: int, fp: int, fn: int) -> tuple[float, float, float]:
     return p, r, f
 
 
+def estimate_pos_weight(dataset: Dataset) -> float:
+    pos = 0
+    neg = 0
+    for i in range(len(dataset)):
+        y = dataset[i]["y"].numpy()
+        pos += int((y > 0).sum())
+        neg += int((y <= 0).sum())
+    if pos <= 0:
+        return 1.0
+    return float(neg / max(pos, 1))
+
+
 def run_epoch_train(
     model: nn.Module,
     loader: DataLoader,
@@ -445,6 +457,8 @@ def run_epoch_eval(
     steps = 0
     tp3 = fp3 = fn3 = 0
     tp05 = fp05 = fn05 = 0
+    peak_count_total = 0
+    max_prob_total = 0.0
 
     for batch in loader:
         x = batch["x"].to(device)
@@ -460,6 +474,8 @@ def run_epoch_eval(
         probs = torch.sigmoid(logits).detach().cpu().numpy().astype(np.float32)
         probs = moving_average_1d(probs, k=smooth_kernel)
         peak_idx = local_max_peaks(probs, threshold=peak_threshold)
+        peak_count_total += len(peak_idx)
+        max_prob_total += float(probs.max()) if probs.size > 0 else 0.0
         pred_times = folded_idx_to_seconds(peak_idx, w_seconds=w_seconds)
 
         gt_times = [float(t) for t in batch["boundary_times"] if float(t) > 1e-8]
@@ -474,9 +490,13 @@ def run_epoch_eval(
 
     p3, r3, f3 = prf(tp3, fp3, fn3)
     p05, r05, f05 = prf(tp05, fp05, fn05)
+    avg_pred_peaks = peak_count_total / max(1, steps)
+    avg_max_prob = max_prob_total / max(1, steps)
     return {
         "loss": total_loss / max(1, steps),
         "num_songs": float(steps),
+        "avg_pred_peaks": avg_pred_peaks,
+        "avg_max_prob": avg_max_prob,
         "hr3p": p3,
         "hr3r": r3,
         "hr3f": f3,
@@ -547,7 +567,8 @@ def main() -> None:
         sr=args.sr,
         hop_length=args.hop_length,
     ).to(device)
-    criterion = nn.BCEWithLogitsLoss()
+    pos_weight = estimate_pos_weight(train_ds)
+    criterion = nn.BCEWithLogitsLoss(pos_weight=torch.tensor(pos_weight, dtype=torch.float32, device=device))
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
 
     split_summary = {
@@ -560,7 +581,15 @@ def main() -> None:
         "n_titles_val": len({r["title"] for r in splits["val"]}),
         "n_titles_test": len({r["title"] for r in splits["test"]}),
     }
-    save_json(run_dir / "config.json", {"args": vars(args), "device": str(device), "split_summary": split_summary})
+    save_json(
+        run_dir / "config.json",
+        {
+            "args": vars(args),
+            "device": str(device),
+            "split_summary": split_summary,
+            "pos_weight": pos_weight,
+        },
+    )
 
     best_epoch = 0
     best_hr3f = -1.0
@@ -572,6 +601,7 @@ def main() -> None:
     print(f"device: {device}")
     print(f"run_dir: {run_dir}")
     print(f"split: train={split_summary['n_train']} val={split_summary['n_val']} test={split_summary['n_test']}")
+    print(f"pos_weight: {pos_weight:.4f}")
 
     for epoch in range(1, args.epochs + 1):
         epoch_t0 = time.perf_counter()
@@ -612,6 +642,8 @@ def main() -> None:
             f"epoch_time={epoch_seconds:.2f}s | "
             f"train_loss={train_metrics['loss']:.4f} | "
             f"val_loss={val_metrics['loss']:.4f} "
+            f"avg_peaks={val_metrics['avg_pred_peaks']:.2f} "
+            f"avg_max_prob={val_metrics['avg_max_prob']:.3f} "
             f"HR3F={val_metrics['hr3f']:.4f} "
             f"HR.5F={val_metrics['hr05f']:.4f}"
         )
