@@ -427,7 +427,7 @@ def run_epoch_train(
         total_loss += float(loss.item())
         steps += 1
 
-    return {"loss": total_loss / max(1, steps)}
+    return {"loss": total_loss / max(1, steps), "num_songs": float(steps)}
 
 
 @torch.no_grad()
@@ -476,6 +476,7 @@ def run_epoch_eval(
     p05, r05, f05 = prf(tp05, fp05, fn05)
     return {
         "loss": total_loss / max(1, steps),
+        "num_songs": float(steps),
         "hr3p": p3,
         "hr3r": r3,
         "hr3f": f3,
@@ -573,6 +574,8 @@ def main() -> None:
     print(f"split: train={split_summary['n_train']} val={split_summary['n_val']} test={split_summary['n_test']}")
 
     for epoch in range(1, args.epochs + 1):
+        epoch_t0 = time.perf_counter()
+        lr = float(optimizer.param_groups[0]["lr"])
         train_metrics = run_epoch_train(
             model=model,
             loader=train_loader,
@@ -590,12 +593,23 @@ def main() -> None:
             smooth_kernel=args.smooth_kernel,
             peak_threshold=args.peak_threshold,
         )
+        epoch_seconds = time.perf_counter() - epoch_t0
 
-        row = {"epoch": epoch, "train": train_metrics, "val": val_metrics}
+        row = {
+            "epoch": epoch,
+            "lr": lr,
+            "epoch_seconds": epoch_seconds,
+            "train": train_metrics,
+            "val": val_metrics,
+        }
         history.append(row)
 
         print(
             f"[Epoch {epoch:03d}] "
+            f"lr={lr:.6g} "
+            f"train_songs={int(train_metrics['num_songs'])} "
+            f"val_songs={int(val_metrics['num_songs'])} "
+            f"epoch_time={epoch_seconds:.2f}s | "
             f"train_loss={train_metrics['loss']:.4f} | "
             f"val_loss={val_metrics['loss']:.4f} "
             f"HR3F={val_metrics['hr3f']:.4f} "
@@ -662,4 +676,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
