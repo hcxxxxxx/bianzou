@@ -246,7 +246,10 @@ class MelBoundaryDataset(Dataset):
         feat = np.load(self.feature_dir / f"{fid}.npy")  # (n_mels, T)
         feat = feat.T.astype(np.float32)  # (T, n_mels)
 
-        y = self._frame_labels([float(t) for t in rec["boundary_times"]], feat.shape[0])  # (T,)
+        # 0s is the start of song (A section), not a variation boundary.
+        # Exclude it from training targets to avoid start-position bias.
+        train_boundary_times = [float(t) for t in rec["boundary_times"] if float(t) > 1e-8]
+        y = self._frame_labels(train_boundary_times, feat.shape[0])  # (T,)
         y_fold = self._fold_mean(y[:, None]).squeeze(-1).astype(np.float32)  # (T/w,)
 
         return {
