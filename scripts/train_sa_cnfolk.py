@@ -449,8 +449,7 @@ def process_prob_sections(
     prob_sections, _ = local_maxima(probs, filter_size=filter_size, step=step)
     _valid_probs = prob_sections[prob_sections > 0]
 
-    # Keep author's hard override behavior.
-    threshold = 0.0001
+    # Use caller-provided threshold (remove hard-coded override).
     pred_mask = prob_sections >= threshold
     pred_times = tensor_to_time(pred_mask, sr=sr, hop_length=hop_length)
     return pred_times
