@@ -11054,45 +11054,6 @@
     ]
   },
   {
-    "song_id": "0327",
-    "title": "孟姜女",
-    "performer": "葛瑞莲",
-    "region": "江苏",
-    "source": "网易云音乐",
-    "album": "扬州民间小调",
-    "filename": "mjn4",
-    "audio_path": "wavs/mjn4.wav",
-    "segments": [
-      {
-        "label": "A",
-        "start": 0.0
-      },
-      {
-        "label": "A1",
-        "start": 68.0
-      },
-      {
-        "label": "A2",
-        "start": 111.0
-      },
-      {
-        "label": "A3",
-        "start": 153.0
-      },
-      {
-        "label": "A4",
-        "start": 239.0
-      }
-    ],
-    "boundary_times": [
-      0.0,
-      68.0,
-      111.0,
-      153.0,
-      239.0
-    ]
-  },
-  {
     "song_id": "0328",
     "title": "孟姜女",
     "performer": "萧孋珠",
