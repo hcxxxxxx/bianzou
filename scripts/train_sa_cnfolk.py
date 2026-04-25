@@ -71,6 +71,11 @@ def parse_args() -> argparse.Namespace:
 
     parser.add_argument("--device", default="auto", choices=["auto", "cpu", "cuda", "mps"])
     parser.add_argument("--disable-cudnn", action="store_true", help="Disable cuDNN for debugging/stability")
+    parser.add_argument(
+        "--debug-batch-crash",
+        action="store_true",
+        help="On exception, dump current batch/tensor diagnostics to run_dir/crash_debug/*.json",
+    )
     parser.add_argument("--run-dir", default="", help="Optional output run directory")
     return parser.parse_args()
 
@@ -101,6 +106,32 @@ def save_json(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8") as f:
         json.dump(payload, f, ensure_ascii=False, indent=2)
+
+
+def tensor_stats(t: torch.Tensor | None) -> dict[str, Any] | None:
+    if t is None:
+        return None
+    td = t.detach()
+    stats: dict[str, Any] = {
+        "shape": list(td.shape),
+        "dtype": str(td.dtype),
+        "device": str(td.device),
+        "numel": int(td.numel()),
+    }
+    if td.numel() == 0:
+        stats.update({"min": None, "max": None, "mean": None, "nan_count": 0, "inf_count": 0})
+        return stats
+    tf = td.float()
+    stats.update(
+        {
+            "min": float(tf.min().item()),
+            "max": float(tf.max().item()),
+            "mean": float(tf.mean().item()),
+            "nan_count": int(torch.isnan(tf).sum().item()),
+            "inf_count": int(torch.isinf(tf).sum().item()),
+        }
+    )
+    return stats
 
 
 def load_records(dataset_json: Path) -> list[dict[str, Any]]:
@@ -457,6 +488,9 @@ def run_epoch_train(
     optimizer: torch.optim.Optimizer,
     device: torch.device,
     grad_accum_steps: int,
+    epoch_idx: int,
+    debug_batch_crash: bool = False,
+    crash_dump_dir: Path | None = None,
 ) -> dict[str, float]:
     model.train(True)
     optimizer.zero_grad(set_to_none=True)
@@ -465,25 +499,57 @@ def run_epoch_train(
     skipped = 0
 
     for step, batch in enumerate(loader, start=1):
-        x = batch["x"].to(device)
-        y = batch["y"].to(device)
-        logits = model(x)
-        n = min(logits.numel(), y.numel())
-        if n <= 0:
-            skipped += 1
-            continue
-        logits = logits[:n]
-        y = y[:n]
-        loss = criterion(logits, y)
-        (loss / grad_accum_steps).backward()
+        x = None
+        y = None
+        logits = None
+        try:
+            x = batch["x"].to(device)
+            y = batch["y"].to(device)
+            logits = model(x)
+            n = min(logits.numel(), y.numel())
+            if n <= 0:
+                skipped += 1
+                continue
+            logits = logits[:n]
+            y = y[:n]
+            loss = criterion(logits, y)
+            (loss / grad_accum_steps).backward()
 
-        if step % grad_accum_steps == 0 or step == len(loader):
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-            optimizer.step()
-            optimizer.zero_grad(set_to_none=True)
+            if step % grad_accum_steps == 0 or step == len(loader):
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                optimizer.step()
+                optimizer.zero_grad(set_to_none=True)
 
-        total_loss += float(loss.item())
-        steps += 1
+            total_loss += float(loss.item())
+            steps += 1
+        except Exception as err:
+            if debug_batch_crash:
+                payload = {
+                    "stage": "train",
+                    "epoch": epoch_idx,
+                    "step": step,
+                    "error_type": type(err).__name__,
+                    "error_message": str(err),
+                    "song_id": batch.get("song_id"),
+                    "title": batch.get("title"),
+                    "filename": batch.get("filename"),
+                    "boundary_times": batch.get("boundary_times"),
+                    "x_stats": tensor_stats(x),
+                    "y_stats": tensor_stats(y),
+                    "logits_stats": tensor_stats(logits),
+                }
+                if crash_dump_dir is not None:
+                    crash_dump_path = crash_dump_dir / f"train_epoch{epoch_idx:03d}_step{step:04d}.json"
+                    save_json(crash_dump_path, payload)
+                    print(f"[CRASH-DEBUG] Saved diagnostics: {crash_dump_path}")
+                else:
+                    print(f"[CRASH-DEBUG] {payload}")
+                if device.type == "cuda":
+                    try:
+                        torch.cuda.synchronize(device)
+                    except Exception:
+                        pass
+            raise
 
     return {"loss": total_loss / max(1, steps), "num_songs": float(steps), "skipped_songs": float(skipped)}
 
@@ -498,6 +564,9 @@ def run_epoch_eval(
     smooth_kernel: int,
     peak_threshold: float,
     sr: int,
+    epoch_idx: int,
+    debug_batch_crash: bool = False,
+    crash_dump_dir: Path | None = None,
 ) -> dict[str, float]:
     model.train(False)
     total_loss = 0.0
@@ -508,54 +577,86 @@ def run_epoch_eval(
     peak_count_total = 0
     max_prob_total = 0.0
 
-    for batch in loader:
-        x = batch["x"].to(device)
-        y = batch["y"].to(device)
-        logits = model(x)
-        n = min(logits.numel(), y.numel())
-        if n <= 0:
-            skipped += 1
-            continue
-        logits = logits[:n]
-        y = y[:n]
-        loss = criterion(logits, y)
-        total_loss += float(loss.item())
-        steps += 1
+    for step, batch in enumerate(loader, start=1):
+        x = None
+        y = None
+        logits = None
+        try:
+            x = batch["x"].to(device)
+            y = batch["y"].to(device)
+            logits = model(x)
+            n = min(logits.numel(), y.numel())
+            if n <= 0:
+                skipped += 1
+                continue
+            logits = logits[:n]
+            y = y[:n]
+            loss = criterion(logits, y)
+            total_loss += float(loss.item())
+            steps += 1
 
-        probs = torch.sigmoid(logits)
-        # Output is at aggregated resolution (one step per w_seconds),
-        # so convert index->time with effective hop = sr * w_seconds.
-        effective_hop = max(1, int(round(sr * w_seconds)))
-        pred_times = process_prob_sections(
-            probs,
-            logits,
-            y,
-            criterion,
-            sr=sr,
-            hop_length=effective_hop,
-            filter_size=smooth_kernel,
-            step=1,
-            threshold=peak_threshold,
-        )
+            probs = torch.sigmoid(logits)
+            # Output is at aggregated resolution (one step per w_seconds),
+            # so convert index->time with effective hop = sr * w_seconds.
+            effective_hop = max(1, int(round(sr * w_seconds)))
+            pred_times = process_prob_sections(
+                probs,
+                logits,
+                y,
+                criterion,
+                sr=sr,
+                hop_length=effective_hop,
+                filter_size=smooth_kernel,
+                step=1,
+                threshold=peak_threshold,
+            )
 
-        probs_np = probs.detach().cpu().numpy().astype(np.float32).reshape(-1)
-        peak_count_total += len(pred_times)
-        max_prob_total += float(probs_np.max()) if probs_np.size > 0 else 0.0
+            probs_np = probs.detach().cpu().numpy().astype(np.float32).reshape(-1)
+            peak_count_total += len(pred_times)
+            max_prob_total += float(probs_np.max()) if probs_np.size > 0 else 0.0
 
-        true_times_full = [float(t) for t in batch["boundary_times"]]
-        true_times_point = [t for t in true_times_full if t > 1e-8]
+            true_times_full = [float(t) for t in batch["boundary_times"]]
+            true_times_point = [t for t in true_times_full if t > 1e-8]
 
-        p05, r05, f05 = match_predictions(pred_times, true_times_point, tolerance=0.5)
-        # Segment-level detection expects full boundary list. Prepend 0.0 for stability.
-        pre_for_seg = sorted(set([0.0] + pred_times))
-        p3, r3, f3 = match_predictions_segment(pre_for_seg, true_times_full, tolerance=3.0)
+            p05, r05, f05 = match_predictions(pred_times, true_times_point, tolerance=0.5)
+            # Segment-level detection expects full boundary list. Prepend 0.0 for stability.
+            pre_for_seg = sorted(set([0.0] + pred_times))
+            p3, r3, f3 = match_predictions_segment(pre_for_seg, true_times_full, tolerance=3.0)
 
-        sum_p3 += p3
-        sum_r3 += r3
-        sum_f3 += f3
-        sum_p05 += p05
-        sum_r05 += r05
-        sum_f05 += f05
+            sum_p3 += p3
+            sum_r3 += r3
+            sum_f3 += f3
+            sum_p05 += p05
+            sum_r05 += r05
+            sum_f05 += f05
+        except Exception as err:
+            if debug_batch_crash:
+                payload = {
+                    "stage": "eval",
+                    "epoch": epoch_idx,
+                    "step": step,
+                    "error_type": type(err).__name__,
+                    "error_message": str(err),
+                    "song_id": batch.get("song_id"),
+                    "title": batch.get("title"),
+                    "filename": batch.get("filename"),
+                    "boundary_times": batch.get("boundary_times"),
+                    "x_stats": tensor_stats(x),
+                    "y_stats": tensor_stats(y),
+                    "logits_stats": tensor_stats(logits),
+                }
+                if crash_dump_dir is not None:
+                    crash_dump_path = crash_dump_dir / f"eval_epoch{epoch_idx:03d}_step{step:04d}.json"
+                    save_json(crash_dump_path, payload)
+                    print(f"[CRASH-DEBUG] Saved diagnostics: {crash_dump_path}")
+                else:
+                    print(f"[CRASH-DEBUG] {payload}")
+                if device.type == "cuda":
+                    try:
+                        torch.cuda.synchronize(device)
+                    except Exception:
+                        pass
+            raise
 
     p3 = sum_p3 / max(1, steps)
     r3 = sum_r3 / max(1, steps)
@@ -677,7 +778,11 @@ def main() -> None:
     print(f"device: {device}")
     print(f"run_dir: {run_dir}")
     print(f"cudnn_enabled: {torch.backends.cudnn.enabled}")
+    print(f"debug_batch_crash: {args.debug_batch_crash}")
     print(f"split: train={split_summary['n_train']} val={split_summary['n_val']} test={split_summary['n_test']}")
+    crash_dump_dir = run_dir / "crash_debug" if args.debug_batch_crash else None
+    if crash_dump_dir is not None:
+        crash_dump_dir.mkdir(parents=True, exist_ok=True)
 
     for epoch in range(1, args.epochs + 1):
         epoch_t0 = time.perf_counter()
@@ -689,6 +794,9 @@ def main() -> None:
             optimizer=optimizer,
             device=device,
             grad_accum_steps=max(1, args.grad_accum_steps),
+            epoch_idx=epoch,
+            debug_batch_crash=args.debug_batch_crash,
+            crash_dump_dir=crash_dump_dir,
         )
         val_metrics = run_epoch_eval(
             model=model,
@@ -699,6 +807,9 @@ def main() -> None:
             smooth_kernel=args.smooth_kernel,
             peak_threshold=args.peak_threshold,
             sr=args.sr,
+            epoch_idx=epoch,
+            debug_batch_crash=args.debug_batch_crash,
+            crash_dump_dir=crash_dump_dir,
         )
         epoch_seconds = time.perf_counter() - epoch_t0
 
@@ -770,6 +881,9 @@ def main() -> None:
         smooth_kernel=args.smooth_kernel,
         peak_threshold=args.peak_threshold,
         sr=args.sr,
+        epoch_idx=best_epoch,
+        debug_batch_crash=args.debug_batch_crash,
+        crash_dump_dir=crash_dump_dir,
     )
     save_json(
         run_dir / "final_report.json",
