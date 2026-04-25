@@ -297,8 +297,7 @@ class MelBoundaryDataset(Dataset):
         rec = self.records[idx]
         fid = str(rec["filename"])
         feat = np.load(self.feature_dir / f"{fid}.npy")  # (n_mels, T)
-        # Enforce C-contiguous layout after transpose for CUDA kernel stability.
-        feat = np.ascontiguousarray(feat.T, dtype=np.float32)  # (T, n_mels)
+        feat = feat.T.astype(np.float32)  # (T, n_mels)
 
         # 0s is the start of song (A section), not a variation boundary.
         # Exclude it from training targets to avoid start-position bias.
@@ -307,8 +306,8 @@ class MelBoundaryDataset(Dataset):
         y_fold = self._fold_mean(y[:, None]).squeeze(-1).astype(np.float32)  # (T/w,)
 
         return {
-            "x": torch.from_numpy(feat).contiguous(),
-            "y": torch.from_numpy(np.ascontiguousarray(y_fold, dtype=np.float32)).contiguous(),
+            "x": torch.tensor(feat, dtype=torch.float32),
+            "y": torch.tensor(y_fold, dtype=torch.float32),
             "boundary_times": [float(t) for t in rec["boundary_times"]],
             "song_id": rec["song_id"],
             "title": rec["title"],
@@ -390,7 +389,6 @@ class SACNFolkModel(nn.Module):
 
     def forward(self, x_tf: torch.Tensor) -> torch.Tensor:
         # x_tf: (T, F) when batch_size=1
-        x_tf = x_tf.contiguous()
         x = x_tf.unsqueeze(0).unsqueeze(0)  # (1, 1, T, F)
         emb = self.embedding(x)  # (1, T, sigma)
         agg = self._aggregate_windows(emb)  # (1, T/w, w*sigma)
@@ -530,8 +528,8 @@ def run_epoch_train(
         dbg_y_stats = tensor_stats(batch.get("y"))
         dbg_logits_stats: dict[str, Any] | None = None
         try:
-            x = batch["x"].contiguous().to(device)
-            y = batch["y"].contiguous().to(device)
+            x = batch["x"].to(device)
+            y = batch["y"].to(device)
             logits = model(x)
             n = min(logits.numel(), y.numel())
             if n <= 0:
@@ -613,8 +611,8 @@ def run_epoch_eval(
         dbg_y_stats = tensor_stats(batch.get("y"))
         dbg_logits_stats: dict[str, Any] | None = None
         try:
-            x = batch["x"].contiguous().to(device)
-            y = batch["y"].contiguous().to(device)
+            x = batch["x"].to(device)
+            y = batch["y"].to(device)
             logits = model(x)
             n = min(logits.numel(), y.numel())
             if n <= 0:
