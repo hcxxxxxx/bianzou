@@ -111,26 +111,48 @@ def save_json(path: Path, payload: dict[str, Any]) -> None:
 def tensor_stats(t: torch.Tensor | None) -> dict[str, Any] | None:
     if t is None:
         return None
-    td = t.detach()
-    stats: dict[str, Any] = {
-        "shape": list(td.shape),
-        "dtype": str(td.dtype),
-        "device": str(td.device),
-        "numel": int(td.numel()),
-    }
-    if td.numel() == 0:
+    stats: dict[str, Any] = {}
+    try:
+        td = t.detach()
+        stats.update(
+            {
+                "shape": list(td.shape),
+                "dtype": str(td.dtype),
+                "device": str(td.device),
+                "numel": int(td.numel()),
+            }
+        )
+    except Exception as exc:
+        return {"stats_error": f"detach_or_meta_failed: {type(exc).__name__}: {exc}"}
+
+    if int(stats.get("numel", 0)) == 0:
         stats.update({"min": None, "max": None, "mean": None, "nan_count": 0, "inf_count": 0})
         return stats
-    tf = td.float()
-    stats.update(
-        {
-            "min": float(tf.min().item()),
-            "max": float(tf.max().item()),
-            "mean": float(tf.mean().item()),
-            "nan_count": int(torch.isnan(tf).sum().item()),
-            "inf_count": int(torch.isinf(tf).sum().item()),
-        }
-    )
+
+    try:
+        # Compute value stats on CPU only; if CUDA context is already corrupted,
+        # return metadata + error instead of raising again.
+        tf = td.float().to("cpu", copy=True)
+        stats.update(
+            {
+                "min": float(tf.min().item()),
+                "max": float(tf.max().item()),
+                "mean": float(tf.mean().item()),
+                "nan_count": int(torch.isnan(tf).sum().item()),
+                "inf_count": int(torch.isinf(tf).sum().item()),
+            }
+        )
+    except Exception as exc:
+        stats.update(
+            {
+                "min": None,
+                "max": None,
+                "mean": None,
+                "nan_count": None,
+                "inf_count": None,
+                "value_stats_error": f"{type(exc).__name__}: {exc}",
+            }
+        )
     return stats
 
 
@@ -502,6 +524,9 @@ def run_epoch_train(
         x = None
         y = None
         logits = None
+        dbg_x_stats = tensor_stats(batch.get("x"))
+        dbg_y_stats = tensor_stats(batch.get("y"))
+        dbg_logits_stats: dict[str, Any] | None = None
         try:
             x = batch["x"].to(device)
             y = batch["y"].to(device)
@@ -512,6 +537,7 @@ def run_epoch_train(
                 continue
             logits = logits[:n]
             y = y[:n]
+            dbg_logits_stats = tensor_stats(logits)
             loss = criterion(logits, y)
             (loss / grad_accum_steps).backward()
 
@@ -534,9 +560,9 @@ def run_epoch_train(
                     "title": batch.get("title"),
                     "filename": batch.get("filename"),
                     "boundary_times": batch.get("boundary_times"),
-                    "x_stats": tensor_stats(x),
-                    "y_stats": tensor_stats(y),
-                    "logits_stats": tensor_stats(logits),
+                    "x_stats": dbg_x_stats if dbg_x_stats is not None else tensor_stats(x),
+                    "y_stats": dbg_y_stats if dbg_y_stats is not None else tensor_stats(y),
+                    "logits_stats": dbg_logits_stats if dbg_logits_stats is not None else tensor_stats(logits),
                 }
                 if crash_dump_dir is not None:
                     crash_dump_path = crash_dump_dir / f"train_epoch{epoch_idx:03d}_step{step:04d}.json"
@@ -581,6 +607,9 @@ def run_epoch_eval(
         x = None
         y = None
         logits = None
+        dbg_x_stats = tensor_stats(batch.get("x"))
+        dbg_y_stats = tensor_stats(batch.get("y"))
+        dbg_logits_stats: dict[str, Any] | None = None
         try:
             x = batch["x"].to(device)
             y = batch["y"].to(device)
@@ -591,6 +620,7 @@ def run_epoch_eval(
                 continue
             logits = logits[:n]
             y = y[:n]
+            dbg_logits_stats = tensor_stats(logits)
             loss = criterion(logits, y)
             total_loss += float(loss.item())
             steps += 1
@@ -641,9 +671,9 @@ def run_epoch_eval(
                     "title": batch.get("title"),
                     "filename": batch.get("filename"),
                     "boundary_times": batch.get("boundary_times"),
-                    "x_stats": tensor_stats(x),
-                    "y_stats": tensor_stats(y),
-                    "logits_stats": tensor_stats(logits),
+                    "x_stats": dbg_x_stats if dbg_x_stats is not None else tensor_stats(x),
+                    "y_stats": dbg_y_stats if dbg_y_stats is not None else tensor_stats(y),
+                    "logits_stats": dbg_logits_stats if dbg_logits_stats is not None else tensor_stats(logits),
                 }
                 if crash_dump_dir is not None:
                     crash_dump_path = crash_dump_dir / f"eval_epoch{epoch_idx:03d}_step{step:04d}.json"
