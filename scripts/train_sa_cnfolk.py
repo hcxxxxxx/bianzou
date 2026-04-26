@@ -257,6 +257,14 @@ def validate_features(records: list[dict[str, Any]], feature_dir: Path, n_mels: 
         raise ValueError("Bad Mel feature shape, sample:\n" + "\n".join(bad[:10]))
 
 
+def strip_start_end_boundaries(boundary_times: list[float]) -> list[float]:
+    """Keep only internal boundaries: remove first and last boundary per song."""
+    ts = sorted(float(t) for t in boundary_times)
+    if len(ts) <= 2:
+        return []
+    return ts[1:-1]
+
+
 class MelBoundaryDataset(Dataset):
     def __init__(
         self,
@@ -301,15 +309,15 @@ class MelBoundaryDataset(Dataset):
         feat = np.load(self.feature_dir / f"{fid}.npy")  # (n_mels, T)
         feat = feat.T.astype(np.float32)  # (T, n_mels)
 
-        # Use all annotated boundaries (including start/end) for training.
-        train_boundary_times = [float(t) for t in rec["boundary_times"]]
-        y = self._frame_labels(train_boundary_times, feat.shape[0])  # (T,)
+        # Remove song start/end boundaries for training/evaluation labels.
+        internal_boundary_times = strip_start_end_boundaries(rec["boundary_times"])
+        y = self._frame_labels(internal_boundary_times, feat.shape[0])  # (T,)
         y_fold = self._fold_mean(y[:, None]).squeeze(-1).astype(np.float32)  # (T/w,)
 
         return {
             "x": torch.tensor(feat, dtype=torch.float32),
             "y": torch.tensor(y_fold, dtype=torch.float32),
-            "boundary_times": [float(t) for t in rec["boundary_times"]],
+            "boundary_times": internal_boundary_times,
             "song_id": rec["song_id"],
             "title": rec["title"],
             "filename": rec["filename"],
@@ -474,6 +482,9 @@ def match_predictions(pred_times: list[float], true_times: list[float], toleranc
 
 
 def match_predictions_segment(pre_section: list[float], true_times: list[float], tolerance: float = 3.0) -> tuple[float, float, float]:
+    if len(true_times) <= 1:
+        return 0.0, 0.0, 0.0
+
     true_section = true_times
     true_section = [[true_section[i], true_section[i + 1]] for i in range(len(true_section) - 1)]
 
@@ -647,14 +658,8 @@ def run_epoch_eval(
 
             true_times_full = sorted(float(t) for t in batch["boundary_times"])
 
-            # Include start/end boundaries in point-level evaluation as requested.
             p05, r05, f05 = match_predictions(pred_times, true_times_full, tolerance=0.5)
-            # Segment-level detection uses boundary pairs; anchor prediction with
-            # annotated song start/end for stable interval construction.
-            if true_times_full:
-                pre_for_seg = sorted(set(pred_times + [true_times_full[0], true_times_full[-1]]))
-            else:
-                pre_for_seg = sorted(set(pred_times))
+            pre_for_seg = sorted(set(pred_times))
             p3, r3, f3 = match_predictions_segment(pre_for_seg, true_times_full, tolerance=3.0)
 
             sum_p3 += p3
