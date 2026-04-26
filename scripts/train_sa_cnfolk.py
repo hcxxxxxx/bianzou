@@ -257,14 +257,6 @@ def validate_features(records: list[dict[str, Any]], feature_dir: Path, n_mels: 
         raise ValueError("Bad Mel feature shape, sample:\n" + "\n".join(bad[:10]))
 
 
-def strip_start_end_boundaries(boundary_times: list[float]) -> list[float]:
-    """Keep only internal boundaries: remove first and last boundary per song."""
-    ts = sorted(float(t) for t in boundary_times)
-    if len(ts) <= 2:
-        return []
-    return ts[1:-1]
-
-
 class MelBoundaryDataset(Dataset):
     def __init__(
         self,
@@ -309,15 +301,15 @@ class MelBoundaryDataset(Dataset):
         feat = np.load(self.feature_dir / f"{fid}.npy")  # (n_mels, T)
         feat = feat.T.astype(np.float32)  # (T, n_mels)
 
-        # Remove song start/end boundaries for training/evaluation labels.
-        internal_boundary_times = strip_start_end_boundaries(rec["boundary_times"])
-        y = self._frame_labels(internal_boundary_times, feat.shape[0])  # (T,)
+        # boundary_times are expected to be pre-cleaned in dataset json.
+        boundary_times = sorted(float(t) for t in rec["boundary_times"])
+        y = self._frame_labels(boundary_times, feat.shape[0])  # (T,)
         y_fold = self._fold_mean(y[:, None]).squeeze(-1).astype(np.float32)  # (T/w,)
 
         return {
             "x": torch.tensor(feat, dtype=torch.float32),
             "y": torch.tensor(y_fold, dtype=torch.float32),
-            "boundary_times": internal_boundary_times,
+            "boundary_times": boundary_times,
             "song_id": rec["song_id"],
             "title": rec["title"],
             "filename": rec["filename"],
