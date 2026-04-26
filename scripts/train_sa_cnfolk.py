@@ -779,13 +779,22 @@ def main() -> None:
     ).to(device)
     criterion = nn.BCEWithLogitsLoss()
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer,
-        mode="max",
-        patience=args.lr_plateau_patience,
-        factor=args.lr_plateau_factor,
-        verbose=True,
-    )
+    # Some older torch versions do not support `verbose` in ReduceLROnPlateau.
+    try:
+        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer,
+            mode="max",
+            patience=args.lr_plateau_patience,
+            factor=args.lr_plateau_factor,
+            verbose=True,
+        )
+    except TypeError:
+        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer,
+            mode="max",
+            patience=args.lr_plateau_patience,
+            factor=args.lr_plateau_factor,
+        )
 
     split_summary = {
         "n_total": len(records),
