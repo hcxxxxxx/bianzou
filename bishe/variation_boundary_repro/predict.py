@@ -37,7 +37,7 @@ def predict_one(model: SACNFolk, mel_path: Path, args: argparse.Namespace) -> li
     mel = np.load(mel_path).astype(np.float32).T
     mel = normalize_mel(mel)
     x = torch.from_numpy(mel).unsqueeze(0).to(args.device)
-    probs = torch.sigmoid(model(x))[0].cpu()
+    probs = torch.sigmoid(model(x, frame_lengths=[mel.shape[0]]))[0].cpu()
     return process_prob_sections(
         probs,
         fold_seconds=model.fold_size * model.hop_length / model.sr,

@@ -4,6 +4,7 @@ import math
 
 import torch
 from torch import nn
+from torch.nn.utils.rnn import pack_padded_sequence, pad_packed_sequence
 
 
 def logit(p: float) -> float:
@@ -70,7 +71,7 @@ class SACNFolk(nn.Module):
         self.classifier = nn.Linear(hidden_size * 2, 1)
         nn.init.constant_(self.classifier.bias, logit(init_confidence))
 
-    def forward(self, inputs: torch.Tensor) -> torch.Tensor:
+    def forward(self, inputs: torch.Tensor, frame_lengths: list[int] | torch.Tensor | None = None) -> torch.Tensor:
         embeddings = self.embedding(inputs)
         batch, frames, channels = embeddings.shape
         n_folds = frames // self.fold_size
@@ -78,7 +79,25 @@ class SACNFolk(nn.Module):
             raise ValueError("input is shorter than one aggregation window")
         embeddings = embeddings[:, : n_folds * self.fold_size, :]
         folded = embeddings.reshape(batch, n_folds, self.fold_size * channels)
-        outputs, _ = self.lstm(folded)
+
+        if frame_lengths is not None:
+            if isinstance(frame_lengths, torch.Tensor):
+                frame_lengths = frame_lengths.detach().cpu().tolist()
+            fold_lengths = [max(1, min(n_folds, int(length) // self.fold_size)) for length in frame_lengths]
+            packed = pack_padded_sequence(
+                folded,
+                lengths=fold_lengths,
+                batch_first=True,
+                enforce_sorted=False,
+            )
+            packed_outputs, _ = self.lstm(packed)
+            outputs, _ = pad_packed_sequence(
+                packed_outputs,
+                batch_first=True,
+                total_length=n_folds,
+            )
+        else:
+            outputs, _ = self.lstm(folded)
+
         logits = self.classifier(outputs).squeeze(-1)
         return logits
-

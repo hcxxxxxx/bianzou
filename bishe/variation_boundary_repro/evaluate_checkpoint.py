@@ -69,7 +69,7 @@ def collect_entries(model: SACNFolk, loader: DataLoader, device: torch.device) -
         mels = batch["mels"].to(device)
         labels = batch["labels"].to(device)
         mask = batch["label_mask"].to(device)
-        logits = model(mels)
+        logits = model(mels, frame_lengths=batch["frame_lengths"])
         labels = labels[:, : logits.shape[1]]
         mask = mask[:, : logits.shape[1]]
         loss = criterion(logits, labels) * mask
@@ -207,4 +207,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

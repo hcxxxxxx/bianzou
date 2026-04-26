@@ -110,7 +110,7 @@ def train_one_epoch(
         mels = batch["mels"].to(device)
         labels = batch["labels"].to(device)
         mask = batch["label_mask"].to(device)
-        logits = model(mels)
+        logits = model(mels, frame_lengths=batch["frame_lengths"])
         labels = labels[:, : logits.shape[1]]
         mask = mask[:, : logits.shape[1]]
         loss = masked_bce_loss(logits, labels, mask, criterion)
@@ -176,7 +176,7 @@ def evaluate(
         mels = batch["mels"].to(device)
         labels = batch["labels"].to(device)
         mask = batch["label_mask"].to(device)
-        logits = model(mels)
+        logits = model(mels, frame_lengths=batch["frame_lengths"])
         labels = labels[:, : logits.shape[1]]
         mask = mask[:, : logits.shape[1]]
         loss = masked_bce_loss(logits, labels, mask, criterion)
