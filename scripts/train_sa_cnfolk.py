@@ -6,7 +6,7 @@ Pipeline:
 2) Feature Embedding (CNN)
 3) Feature Aggregation (non-overlap window w)
 4) Bi-LSTM + Linear classifier
-5) BCELoss training
+5) BCEWithLogitsLoss training
 6) Post-processing (smoothing + local maxima)
 7) HR3/HR.5 evaluation
 
@@ -42,8 +42,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--batch-size", type=int, default=1, help="Must be 1")
     parser.add_argument("--epochs", type=int, default=80)
     parser.add_argument("--lr", type=float, default=1e-3)
-    parser.add_argument("--weight-decay", type=float, default=1e-4)
-    parser.add_argument("--grad-accum-steps", type=int, default=1)
+    parser.add_argument("--weight-decay", type=float, default=0.0)
+    parser.add_argument("--grad-accum-steps", type=int, default=2)
+    parser.add_argument("--lr-plateau-patience", type=int, default=10)
+    parser.add_argument("--lr-plateau-factor", type=float, default=0.5)
     parser.add_argument("--early-stop-patience", type=int, default=5)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--num-workers", type=int, default=0)
@@ -776,7 +778,14 @@ def main() -> None:
         hop_length=args.hop_length,
     ).to(device)
     criterion = nn.BCEWithLogitsLoss()
-    optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
+    optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer,
+        mode="max",
+        patience=args.lr_plateau_patience,
+        factor=args.lr_plateau_factor,
+        verbose=True,
+    )
 
     split_summary = {
         "n_total": len(records),
@@ -808,6 +817,7 @@ def main() -> None:
     print(f"run_dir: {run_dir}")
     print(f"cudnn_enabled: {torch.backends.cudnn.enabled}")
     print(f"debug_batch_crash: {args.debug_batch_crash}")
+    print(f"grad_accum_steps: {max(1, args.grad_accum_steps)}")
     print(f"split: train={split_summary['n_train']} val={split_summary['n_val']} test={split_summary['n_test']}")
     crash_dump_dir = run_dir / "crash_debug" if args.debug_batch_crash else None
     if crash_dump_dir is not None:
@@ -851,6 +861,9 @@ def main() -> None:
         }
         history.append(row)
 
+        # Align with author's code: scheduler.step(avg_f1_val)
+        scheduler.step(float(val_metrics["hr3f"]))
+
         print(
             f"[Epoch {epoch:03d}] "
             f"lr={lr:.6g} "
@@ -883,6 +896,7 @@ def main() -> None:
                     "epoch": epoch,
                     "model_state_dict": model.state_dict(),
                     "optimizer_state_dict": optimizer.state_dict(),
+                    "scheduler_state_dict": scheduler.state_dict(),
                     "best_hr3f": best_hr3f,
                     "best_val_loss": best_val_loss,
                     "args": vars(args),
