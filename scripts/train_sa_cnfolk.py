@@ -301,9 +301,8 @@ class MelBoundaryDataset(Dataset):
         feat = np.load(self.feature_dir / f"{fid}.npy")  # (n_mels, T)
         feat = feat.T.astype(np.float32)  # (T, n_mels)
 
-        # 0s is the start of song (A section), not a variation boundary.
-        # Exclude it from training targets to avoid start-position bias.
-        train_boundary_times = [float(t) for t in rec["boundary_times"] if float(t) > 1e-8]
+        # Use all annotated boundaries (including start/end) for training.
+        train_boundary_times = [float(t) for t in rec["boundary_times"]]
         y = self._frame_labels(train_boundary_times, feat.shape[0])  # (T,)
         y_fold = self._fold_mean(y[:, None]).squeeze(-1).astype(np.float32)  # (T/w,)
 
@@ -646,12 +645,16 @@ def run_epoch_eval(
             peak_count_total += len(pred_times)
             max_prob_total += float(probs_np.max()) if probs_np.size > 0 else 0.0
 
-            true_times_full = [float(t) for t in batch["boundary_times"]]
-            true_times_point = [t for t in true_times_full if t > 1e-8]
+            true_times_full = sorted(float(t) for t in batch["boundary_times"])
 
-            p05, r05, f05 = match_predictions(pred_times, true_times_point, tolerance=0.5)
-            # Segment-level detection expects full boundary list. Prepend 0.0 for stability.
-            pre_for_seg = sorted(set([0.0] + pred_times))
+            # Include start/end boundaries in point-level evaluation as requested.
+            p05, r05, f05 = match_predictions(pred_times, true_times_full, tolerance=0.5)
+            # Segment-level detection uses boundary pairs; anchor prediction with
+            # annotated song start/end for stable interval construction.
+            if true_times_full:
+                pre_for_seg = sorted(set(pred_times + [true_times_full[0], true_times_full[-1]]))
+            else:
+                pre_for_seg = sorted(set(pred_times))
             p3, r3, f3 = match_predictions_segment(pre_for_seg, true_times_full, tolerance=3.0)
 
             sum_p3 += p3
