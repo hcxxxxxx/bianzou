@@ -31,6 +31,13 @@ python3 bishe/variation_boundary_repro/extract_mels.py
 python3 bishe/variation_boundary_repro/train.py
 ```
 
+After training, sweep post-processing choices without retraining:
+
+```bash
+python3 bishe/variation_boundary_repro/evaluate_checkpoint.py --split val
+python3 bishe/variation_boundary_repro/evaluate_checkpoint.py --split test
+```
+
 Artifacts are written under:
 
 ```text
@@ -70,4 +77,3 @@ w=1.0s, sigma=24, hidden=128, LSTM layers=2
 `mir_eval` is not required. The boundary matching metric here is implemented
 directly as one-to-one boundary matching within the requested tolerance window,
 which corresponds to the HR.5 and HR3 boundary metrics described in the paper.
-
