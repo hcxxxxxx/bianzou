@@ -38,6 +38,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--n-mels", type=int, default=128)
     parser.add_argument("--fold-seconds", type=float, default=1.0)
     parser.add_argument("--label-tolerance", type=float, default=3.0)
+    parser.add_argument(
+        "--no-normalize-mel",
+        dest="normalize_mel",
+        action="store_false",
+        help="Use raw log-Mel dB values, matching the author's feature-saving snippet.",
+    )
+    parser.set_defaults(normalize_mel=True)
     parser.add_argument("--embed-dim", type=int, default=24)
     parser.add_argument("--hidden-size", type=int, default=128)
     parser.add_argument("--lstm-layers", type=int, default=2)
@@ -277,6 +284,7 @@ def main() -> None:
             hop_length=args.hop_length,
             fold_seconds=args.fold_seconds,
             label_tolerance=args.label_tolerance,
+            normalize=args.normalize_mel,
         )
         for split, stems in splits["splits"].items()
     }

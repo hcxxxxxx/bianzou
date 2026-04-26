@@ -55,6 +55,7 @@ class VariationBoundaryDataset(Dataset):
         hop_length: int = 512,
         fold_seconds: float = 1.0,
         label_tolerance: float = 3.0,
+        normalize: bool = True,
     ) -> None:
         self.items = {item["filename"]: item for item in metadata}
         self.stems = list(stems)
@@ -63,6 +64,7 @@ class VariationBoundaryDataset(Dataset):
         self.hop_length = hop_length
         self.fold_seconds = fold_seconds
         self.label_tolerance = label_tolerance
+        self.normalize = normalize
         self.fold_size = max(1, int(round(fold_seconds * sr / hop_length)))
         self.missing_features = [
             stem for stem in self.stems if not (self.mel_dir / f"{stem}.npy").exists()
@@ -75,7 +77,9 @@ class VariationBoundaryDataset(Dataset):
         stem = self.stems[index]
         item = self.items[stem]
         mel = np.load(self.mel_dir / f"{stem}.npy").astype(np.float32)
-        mel_t = normalize_mel(mel.T)
+        mel_t = mel.T
+        if self.normalize:
+            mel_t = normalize_mel(mel_t)
         labels = make_frame_labels(
             item.get("boundary_times", []),
             n_frames=mel_t.shape[0],
@@ -133,4 +137,3 @@ def collate_batch(batch: list[dict[str, Any]]) -> dict[str, Any]:
         "stems": stems,
         "true_times": true_times,
     }
-

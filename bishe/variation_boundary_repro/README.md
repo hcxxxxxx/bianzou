@@ -66,6 +66,13 @@ python3 bishe/variation_boundary_repro/train.py \
   --threshold 0.05
 ```
 
+For closer alignment with the author's feature-saving snippet, disable per-song
+Mel normalization:
+
+```bash
+python3 bishe/variation_boundary_repro/train.py --no-normalize-mel --tune-threshold --max-predictions-per-song 4
+```
+
 The paper reports the best hyperparameter set as:
 
 ```text

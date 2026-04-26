@@ -43,6 +43,19 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--filter-size-grid", type=str, default="5,7,9,11,15,21")
     parser.add_argument("--max-predictions-grid", type=str, default="0,1,2,3,4,5,6")
     parser.add_argument("--oracle-count", action="store_true", help="Diagnostic only: keep top peaks equal to each song's true boundary count.")
+    parser.add_argument(
+        "--no-normalize-mel",
+        dest="normalize_mel",
+        action="store_false",
+        help="Override checkpoint setting and use raw log-Mel dB values.",
+    )
+    parser.add_argument(
+        "--normalize-mel",
+        dest="normalize_mel",
+        action="store_true",
+        help="Override checkpoint setting and use per-song normalized log-Mel values.",
+    )
+    parser.set_defaults(normalize_mel=None)
     parser.add_argument("--output", type=Path, default=None)
     return parser.parse_args()
 
@@ -141,6 +154,7 @@ def main() -> None:
         hop_length=ckpt_args["hop_length"],
         fold_seconds=ckpt_args["fold_seconds"],
         label_tolerance=ckpt_args["label_tolerance"],
+        normalize=ckpt_args.get("normalize_mel", True) if args.normalize_mel is None else args.normalize_mel,
     )
     loader = DataLoader(
         dataset,

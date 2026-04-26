@@ -28,14 +28,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--threshold", type=float, default=0.05)
     parser.add_argument("--filter-size", type=int, default=9)
     parser.add_argument("--max-predictions-per-song", type=int, default=0)
+    parser.add_argument("--no-normalize-mel", dest="normalize_mel", action="store_false")
+    parser.add_argument("--normalize-mel", dest="normalize_mel", action="store_true")
+    parser.set_defaults(normalize_mel=None)
     parser.add_argument("--device", type=str, default="cpu")
     return parser.parse_args()
 
 
 @torch.no_grad()
-def predict_one(model: SACNFolk, mel_path: Path, args: argparse.Namespace) -> list[float]:
+def predict_one(model: SACNFolk, mel_path: Path, args: argparse.Namespace, normalize: bool) -> list[float]:
     mel = np.load(mel_path).astype(np.float32).T
-    mel = normalize_mel(mel)
+    if normalize:
+        mel = normalize_mel(mel)
     x = torch.from_numpy(mel).unsqueeze(0).to(args.device)
     probs = torch.sigmoid(model(x, frame_lengths=[mel.shape[0]]))[0].cpu()
     return process_prob_sections(
@@ -53,6 +57,7 @@ def main() -> None:
     metadata = load_metadata(metadata_path)
     checkpoint = torch.load(args.checkpoint, map_location=args.device, weights_only=False)
     ckpt_args = checkpoint["args"]
+    normalize = ckpt_args.get("normalize_mel", True) if args.normalize_mel is None else args.normalize_mel
 
     model = SACNFolk(
         n_mels=ckpt_args["n_mels"],
@@ -72,7 +77,7 @@ def main() -> None:
         stem = item["filename"]
         if args.filename and stem != args.filename:
             continue
-        pred_times = predict_one(model, args.mel_dir / f"{stem}.npy", args)
+        pred_times = predict_one(model, args.mel_dir / f"{stem}.npy", args, normalize=normalize)
         rows.append(
             {
                 "filename": stem,
