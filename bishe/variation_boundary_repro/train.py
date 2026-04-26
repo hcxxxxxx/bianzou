@@ -52,6 +52,19 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--scheduler-factor", type=float, default=0.5)
     parser.add_argument("--filter-size", type=int, default=9)
     parser.add_argument("--threshold", type=float, default=0.05)
+    parser.add_argument(
+        "--threshold-grid",
+        type=str,
+        default="0.05,0.10,0.15,0.20,0.25,0.30,0.35,0.40,0.45,0.50,0.60,0.70,0.80",
+        help="Comma-separated thresholds searched on validation data.",
+    )
+    parser.add_argument("--tune-threshold", action="store_true")
+    parser.add_argument(
+        "--max-predictions-per-song",
+        type=int,
+        default=0,
+        help="Keep only the strongest N local maxima per song; 0 keeps all peaks.",
+    )
     parser.add_argument("--device", type=str, default="auto")
     return parser.parse_args()
 
@@ -118,6 +131,33 @@ def train_one_epoch(
     return total_loss / max(total_items, 1)
 
 
+def rows_from_prob_entries(
+    entries: list[dict],
+    threshold: float,
+    fold_seconds: float,
+    filter_size: int,
+    max_predictions_per_song: int,
+) -> list[dict]:
+    max_predictions = max_predictions_per_song if max_predictions_per_song > 0 else None
+    rows = []
+    for entry in entries:
+        pred_times = process_prob_sections(
+            entry["probs"],
+            fold_seconds=fold_seconds,
+            filter_size=filter_size,
+            threshold=threshold,
+            max_predictions=max_predictions,
+        )
+        rows.append(
+            {
+                "filename": entry["filename"],
+                "pred_times": pred_times,
+                "true_times": entry["true_times"],
+            }
+        )
+    return rows
+
+
 @torch.no_grad()
 def evaluate(
     model: SACNFolk,
@@ -129,7 +169,8 @@ def evaluate(
     model.eval()
     total_loss = 0.0
     total_items = 0
-    rows: list[dict] = []
+    entries: list[dict] = []
+    fold_seconds = model.fold_size * args.hop_length / args.sr
 
     for batch in tqdm(loader, desc="eval", leave=False):
         mels = batch["mels"].to(device)
@@ -147,22 +188,58 @@ def evaluate(
         probs = torch.sigmoid(logits).cpu()
         for i, stem in enumerate(batch["stems"]):
             n = int(batch["fold_lengths"][i])
-            pred_times = process_prob_sections(
-                probs[i, :n],
-                fold_seconds=model.fold_size * args.hop_length / args.sr,
-                filter_size=args.filter_size,
-                threshold=args.threshold,
-            )
-            rows.append(
+            entries.append(
                 {
                     "filename": stem,
-                    "pred_times": pred_times,
+                    "probs": probs[i, :n],
                     "true_times": batch["true_times"][i],
                 }
             )
 
+    rows = rows_from_prob_entries(
+        entries,
+        threshold=args.threshold,
+        fold_seconds=fold_seconds,
+        filter_size=args.filter_size,
+        max_predictions_per_song=args.max_predictions_per_song,
+    )
     metrics = evaluate_boundary_predictions(rows)
-    return total_loss / max(total_items, 1), metrics, rows
+    return total_loss / max(total_items, 1), metrics, rows, entries
+
+
+def parse_threshold_grid(value: str) -> list[float]:
+    thresholds = []
+    for part in value.split(","):
+        part = part.strip()
+        if part:
+            thresholds.append(float(part))
+    return thresholds
+
+
+def select_best_threshold(
+    entries: list[dict],
+    args: argparse.Namespace,
+    fold_seconds: float,
+) -> tuple[float, dict]:
+    candidates = parse_threshold_grid(args.threshold_grid)
+    if args.threshold not in candidates:
+        candidates.append(args.threshold)
+    best_threshold = args.threshold
+    best_metrics = None
+    for threshold in sorted(set(candidates)):
+        rows = rows_from_prob_entries(
+            entries,
+            threshold=threshold,
+            fold_seconds=fold_seconds,
+            filter_size=args.filter_size,
+            max_predictions_per_song=args.max_predictions_per_song,
+        )
+        metrics = evaluate_boundary_predictions(rows)
+        if best_metrics is None or metrics["HR3"]["f1"] > best_metrics["HR3"]["f1"]:
+            best_threshold = threshold
+            best_metrics = metrics
+    assert best_metrics is not None
+    return best_threshold, best_metrics
 
 
 def resolve_device(name: str) -> torch.device:
@@ -258,7 +335,14 @@ def main() -> None:
             device,
             accum_steps=args.accum_steps,
         )
-        val_loss, val_metrics, _ = evaluate(model, loaders["val"], criterion, device, args)
+        val_loss, val_metrics, _, val_entries = evaluate(model, loaders["val"], criterion, device, args)
+        selected_threshold = args.threshold
+        if args.tune_threshold:
+            selected_threshold, val_metrics = select_best_threshold(
+                val_entries,
+                args,
+                fold_seconds=model.fold_size * args.hop_length / args.sr,
+            )
         val_f1 = val_metrics["HR3"]["f1"]
         scheduler.step(val_f1)
 
@@ -267,13 +351,14 @@ def main() -> None:
             "train_loss": train_loss,
             "val_loss": val_loss,
             "val_metrics": val_metrics,
+            "selected_threshold": selected_threshold,
             "lr": optimizer.param_groups[0]["lr"],
         }
         history.append(record)
         print(
             f"epoch {epoch:03d} train_loss={train_loss:.4f} val_loss={val_loss:.4f} "
             f"HR3F={val_f1:.4f} HR3P={val_metrics['HR3']['precision']:.4f} "
-            f"HR3R={val_metrics['HR3']['recall']:.4f}"
+            f"HR3R={val_metrics['HR3']['recall']:.4f} threshold={selected_threshold:.3f}"
         )
 
         if val_f1 > best_f1:
@@ -286,6 +371,7 @@ def main() -> None:
                     "splits": splits,
                     "epoch": epoch,
                     "val_metrics": val_metrics,
+                    "selected_threshold": selected_threshold,
                 },
                 best_path,
             )
@@ -299,7 +385,8 @@ def main() -> None:
 
     checkpoint = torch.load(best_path, map_location=device, weights_only=False)
     model.load_state_dict(checkpoint["model_state"])
-    test_loss, test_metrics, test_rows = evaluate(model, loaders["test"], criterion, device, args)
+    args.threshold = checkpoint.get("selected_threshold", args.threshold)
+    test_loss, test_metrics, test_rows, _ = evaluate(model, loaders["test"], criterion, device, args)
     save_json(
         {
             "best_epoch": checkpoint["epoch"],

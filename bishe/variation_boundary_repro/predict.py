@@ -27,6 +27,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output", type=Path, default=root / "artifacts" / "predictions.json")
     parser.add_argument("--threshold", type=float, default=0.05)
     parser.add_argument("--filter-size", type=int, default=9)
+    parser.add_argument("--max-predictions-per-song", type=int, default=0)
     parser.add_argument("--device", type=str, default="cpu")
     return parser.parse_args()
 
@@ -42,6 +43,7 @@ def predict_one(model: SACNFolk, mel_path: Path, args: argparse.Namespace) -> li
         fold_seconds=model.fold_size * model.hop_length / model.sr,
         filter_size=args.filter_size,
         threshold=args.threshold,
+        max_predictions=args.max_predictions_per_song if args.max_predictions_per_song > 0 else None,
     )
 
 
