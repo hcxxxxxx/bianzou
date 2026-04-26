@@ -420,8 +420,16 @@ def local_maxima(probs: torch.Tensor | np.ndarray, filter_size: int = 9, step: i
     for i in range(0, arr.size, step):
         left = max(0, i - half)
         right = min(arr.size, i + half + 1)
-        if arr[i] >= np.max(arr[left:right]):
-            out[i] = arr[i]
+        window = arr[left:right]
+        local_max = np.max(window)
+        if arr[i] < local_max:
+            continue
+        # Suppress plateau maxima to avoid exploding peak counts when probabilities
+        # are locally flat or saturated.
+        tie_count = int(np.isclose(window, local_max, rtol=1e-6, atol=1e-8).sum())
+        if tie_count > 1:
+            continue
+        out[i] = arr[i]
     idx = np.where(out > 0)[0].astype(np.int64)
     return out, idx
 
@@ -474,7 +482,7 @@ def match_predictions(pred_times: list[float], true_times: list[float], toleranc
 
 
 def match_predictions_segment(pre_section: list[float], true_times: list[float], tolerance: float = 3.0) -> tuple[float, float, float]:
-    if len(true_times) <= 1:
+    if len(true_times) < 2:
         return 0.0, 0.0, 0.0
 
     true_section = true_times
@@ -504,6 +512,23 @@ def match_predictions_segment(pre_section: list[float], true_times: list[float],
         recall = 0.0
         f1 = 0.0
     return precision, recall, f1
+
+
+def build_segment_boundaries(boundary_times: list[float], duration_sec: float) -> list[float]:
+    """Convert internal boundaries to full boundary list [0, ..., duration]."""
+    eps = 1e-6
+    if duration_sec <= eps:
+        return []
+    mids = sorted(float(t) for t in boundary_times if eps < float(t) < (duration_sec - eps))
+    out = [0.0] + mids + [float(duration_sec)]
+    # Deduplicate and enforce strict monotonicity.
+    cleaned: list[float] = []
+    for t in out:
+        if not cleaned or (t - cleaned[-1]) > eps:
+            cleaned.append(t)
+    if len(cleaned) < 2:
+        cleaned = [0.0, float(duration_sec)]
+    return cleaned
 
 
 def run_epoch_train(
@@ -590,6 +615,7 @@ def run_epoch_eval(
     criterion: nn.Module,
     device: torch.device,
     w_seconds: float,
+    hop_length: int,
     smooth_kernel: int,
     peak_threshold: float,
     sr: int,
@@ -630,8 +656,10 @@ def run_epoch_eval(
 
             probs = torch.sigmoid(logits)
             # Output is at aggregated resolution (one step per w_seconds),
-            # so convert index->time with effective hop = sr * w_seconds.
-            effective_hop = max(1, int(round(sr * w_seconds)))
+            # so convert index->time with effective hop = fold_size * hop_length.
+            frame_duration = hop_length / sr
+            fold_size = max(1, int(w_seconds / frame_duration))
+            effective_hop = max(1, fold_size * hop_length)
             pred_times = process_prob_sections(
                 probs,
                 logits,
@@ -648,11 +676,13 @@ def run_epoch_eval(
             peak_count_total += len(pred_times)
             max_prob_total += float(probs_np.max()) if probs_np.size > 0 else 0.0
 
-            true_times_full = sorted(float(t) for t in batch["boundary_times"])
+            true_times_internal = sorted(float(t) for t in batch["boundary_times"])
+            song_duration_sec = float(batch["x"].shape[0] * (hop_length / sr))
 
-            p05, r05, f05 = match_predictions(pred_times, true_times_full, tolerance=0.5)
-            pre_for_seg = sorted(set(pred_times))
-            p3, r3, f3 = match_predictions_segment(pre_for_seg, true_times_full, tolerance=3.0)
+            p05, r05, f05 = match_predictions(pred_times, true_times_internal, tolerance=0.5)
+            pre_for_seg = build_segment_boundaries(pred_times, song_duration_sec)
+            true_for_seg = build_segment_boundaries(true_times_internal, song_duration_sec)
+            p3, r3, f3 = match_predictions_segment(pre_for_seg, true_for_seg, tolerance=3.0)
 
             sum_p3 += p3
             sum_r3 += r3
@@ -852,6 +882,7 @@ def main() -> None:
             criterion=criterion,
             device=device,
             w_seconds=args.w_seconds,
+            hop_length=args.hop_length,
             smooth_kernel=args.smooth_kernel,
             peak_threshold=args.peak_threshold,
             sr=args.sr,
@@ -930,6 +961,7 @@ def main() -> None:
         criterion=criterion,
         device=device,
         w_seconds=args.w_seconds,
+        hop_length=args.hop_length,
         smooth_kernel=args.smooth_kernel,
         peak_threshold=args.peak_threshold,
         sr=args.sr,
