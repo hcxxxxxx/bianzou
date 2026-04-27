@@ -168,36 +168,33 @@ def load_records(dataset_json: Path) -> list[dict[str, Any]]:
 
 
 def split_by_title(records: list[dict[str, Any]], seed: int) -> dict[str, list[dict[str, Any]]]:
-    """按歌曲分组进行 8:1:1 划分（按样本数近似配比）。"""
+    """先按 unique 歌名做 8:1:1，再将该歌名下全部版本整体归入对应集合。"""
     groups: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for rec in records:
         groups[str(rec["title"])].append(rec)
 
     rng = random.Random(seed)
-    grouped = list(groups.items())
-    rng.shuffle(grouped)
-    grouped.sort(key=lambda item: len(item[1]), reverse=True)
+    unique_titles = sorted(groups.keys())
+    rng.shuffle(unique_titles)
 
-    total = len(records)
-    target_train = int(round(total * 0.8))
-    target_val = int(round(total * 0.1))
-    target_test = total - target_train - target_val
-    targets = {"train": target_train, "val": target_val, "test": target_test}
+    n_titles = len(unique_titles)
+    n_train_titles = int(round(n_titles * 0.8))
+    n_val_titles = int(round(n_titles * 0.1))
+    n_test_titles = n_titles - n_train_titles - n_val_titles
+
+    train_titles = set(unique_titles[:n_train_titles])
+    val_titles = set(unique_titles[n_train_titles : n_train_titles + n_val_titles])
+    test_titles = set(unique_titles[n_train_titles + n_val_titles :])
+    if len(test_titles) != n_test_titles:
+        raise RuntimeError("title split size mismatch")
 
     splits = {"train": [], "val": [], "test": []}
-    counts = {"train": 0, "val": 0, "test": 0}
-
-    for _title, recs in grouped:
-        size = len(recs)
-        gaps = {k: targets[k] - counts[k] for k in targets}
-        positive = [k for k in targets if gaps[k] > 0]
-        if positive:
-            positive.sort(key=lambda k: (gaps[k], -counts[k] / max(targets[k], 1)), reverse=True)
-            chosen = positive[0]
-        else:
-            chosen = min(targets, key=lambda k: abs((counts[k] + size) - targets[k]))
-        splits[chosen].extend(recs)
-        counts[chosen] += size
+    for title in train_titles:
+        splits["train"].extend(groups[title])
+    for title in val_titles:
+        splits["val"].extend(groups[title])
+    for title in test_titles:
+        splits["test"].extend(groups[title])
 
     # 防止同名歌曲跨集合泄漏
     title_sets = {name: {str(r["title"]) for r in recs} for name, recs in splits.items()}
@@ -898,6 +895,13 @@ def main() -> None:
     print(f"debug_batch_crash: {args.debug_batch_crash}")
     print(f"grad_accum_steps: {max(1, args.grad_accum_steps)}")
     print(f"split: train={split_summary['n_train']} val={split_summary['n_val']} test={split_summary['n_test']}")
+    print(
+        "split_titles: "
+        f"train={split_summary['n_titles_train']} "
+        f"val={split_summary['n_titles_val']} "
+        f"test={split_summary['n_titles_test']} "
+        f"(total={split_summary['n_titles_total']})"
+    )
     crash_dump_dir = run_dir / "crash_debug" if args.debug_batch_crash else None
     if crash_dump_dir is not None:
         crash_dump_dir.mkdir(parents=True, exist_ok=True)
