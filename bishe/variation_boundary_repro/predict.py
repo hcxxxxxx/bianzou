@@ -27,7 +27,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output", type=Path, default=root / "artifacts" / "predictions.json")
     parser.add_argument("--threshold", type=float, default=0.0001)
     parser.add_argument("--filter-size", type=int, default=9)
-    parser.add_argument("--peak-mode", choices=["maxpool", "strict"], default="maxpool")
+    parser.add_argument("--peak-mode", choices=["author", "maxpool", "strict"], default="author")
+    parser.add_argument("--peak-step", type=int, default=1)
     parser.add_argument("--time-position", choices=["center", "start"], default="center")
     parser.add_argument("--max-predictions-per-song", type=int, default=0)
     parser.add_argument("--min-predictions-per-song", type=int, default=0)
@@ -51,6 +52,7 @@ def predict_one(model: SACNFolk, mel_path: Path, args: argparse.Namespace, norma
         filter_size=args.filter_size,
         threshold=args.threshold,
         peak_mode=args.peak_mode,
+        step=args.peak_step,
         time_position=args.time_position,
         max_predictions=args.max_predictions_per_song if args.max_predictions_per_song > 0 else None,
         min_predictions=args.min_predictions_per_song,

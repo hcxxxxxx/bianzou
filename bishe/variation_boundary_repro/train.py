@@ -65,7 +65,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--scheduler-factor", type=float, default=0.5)
     parser.add_argument("--filter-size", type=int, default=9)
     parser.add_argument("--threshold", type=float, default=0.0001)
-    parser.add_argument("--peak-mode", choices=["maxpool", "strict"], default="maxpool")
+    parser.add_argument("--peak-mode", choices=["author", "maxpool", "strict"], default="author")
+    parser.add_argument("--peak-step", type=int, default=1)
     parser.add_argument("--time-position", choices=["center", "start"], default="center")
     parser.add_argument(
         "--threshold-grid",
@@ -166,6 +167,7 @@ def rows_from_prob_entries(
     max_predictions_per_song: int,
     min_predictions_per_song: int,
     peak_mode: str,
+    peak_step: int,
     time_position: str,
 ) -> list[dict]:
     max_predictions = max_predictions_per_song if max_predictions_per_song > 0 else None
@@ -177,6 +179,7 @@ def rows_from_prob_entries(
             filter_size=filter_size,
             threshold=threshold,
             peak_mode=peak_mode,
+            step=peak_step,
             time_position=time_position,
             max_predictions=max_predictions,
             min_predictions=min_predictions_per_song,
@@ -237,6 +240,7 @@ def evaluate(
         max_predictions_per_song=args.max_predictions_per_song,
         min_predictions_per_song=args.min_predictions_per_song,
         peak_mode=args.peak_mode,
+        peak_step=args.peak_step,
         time_position=args.time_position,
     )
     metrics = evaluate_boundary_predictions(rows)
@@ -271,6 +275,7 @@ def select_best_threshold(
             max_predictions_per_song=args.max_predictions_per_song,
             min_predictions_per_song=args.min_predictions_per_song,
             peak_mode=args.peak_mode,
+            peak_step=args.peak_step,
             time_position=args.time_position,
         )
         metrics = evaluate_boundary_predictions(rows)

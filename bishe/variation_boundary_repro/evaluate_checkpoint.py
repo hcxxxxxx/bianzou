@@ -44,6 +44,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-predictions-grid", type=str, default="0,1,2,3,4,5,6")
     parser.add_argument("--min-predictions-grid", type=str, default="0")
     parser.add_argument("--peak-mode-grid", type=str, default=None)
+    parser.add_argument("--peak-step-grid", type=str, default=None)
     parser.add_argument("--time-position-grid", type=str, default=None)
     parser.add_argument("--oracle-count", action="store_true", help="Diagnostic only: keep top peaks equal to each song's true boundary count.")
     parser.add_argument(
@@ -115,6 +116,7 @@ def evaluate_entries(
     max_predictions: int,
     min_predictions: int,
     peak_mode: str,
+    peak_step: int,
     time_position: str,
     oracle_count: bool = False,
 ) -> dict:
@@ -127,6 +129,7 @@ def evaluate_entries(
             filter_size=filter_size,
             threshold=threshold,
             peak_mode=peak_mode,
+            step=peak_step,
             time_position=time_position,
             max_predictions=cap if cap > 0 else None,
             min_predictions=min_predictions,
@@ -145,6 +148,7 @@ def evaluate_entries(
         "max_predictions_per_song": "oracle" if oracle_count else max_predictions,
         "min_predictions_per_song": min_predictions,
         "peak_mode": peak_mode,
+        "peak_step": peak_step,
         "time_position": time_position,
         "metrics": metrics,
     }
@@ -192,40 +196,44 @@ def main() -> None:
     entries, loss = collect_entries(model, loader, device)
     fold_seconds = model.fold_size * model.hop_length / model.sr
     results = []
-    peak_modes = args.peak_mode_grid.split(",") if args.peak_mode_grid else [ckpt_args.get("peak_mode", "maxpool")]
+    peak_modes = args.peak_mode_grid.split(",") if args.peak_mode_grid else [ckpt_args.get("peak_mode", "author")]
+    peak_steps = parse_int_grid(args.peak_step_grid) if args.peak_step_grid else [int(ckpt_args.get("peak_step", 1))]
     time_positions = args.time_position_grid.split(",") if args.time_position_grid else [ckpt_args.get("time_position", "center")]
     for filter_size in parse_int_grid(args.filter_size_grid):
         for threshold in parse_float_grid(args.threshold_grid):
             for peak_mode in peak_modes:
-                for time_position in time_positions:
-                    for max_predictions in parse_int_grid(args.max_predictions_grid):
-                        for min_predictions in parse_int_grid(args.min_predictions_grid):
+                for peak_step in peak_steps:
+                    for time_position in time_positions:
+                        for max_predictions in parse_int_grid(args.max_predictions_grid):
+                            for min_predictions in parse_int_grid(args.min_predictions_grid):
+                                results.append(
+                                    evaluate_entries(
+                                        entries,
+                                        threshold=threshold,
+                                        filter_size=filter_size,
+                                        fold_seconds=fold_seconds,
+                                        max_predictions=max_predictions,
+                                        min_predictions=min_predictions,
+                                        peak_mode=peak_mode,
+                                        peak_step=peak_step,
+                                        time_position=time_position,
+                                    )
+                                )
+                        if args.oracle_count:
                             results.append(
                                 evaluate_entries(
                                     entries,
                                     threshold=threshold,
                                     filter_size=filter_size,
                                     fold_seconds=fold_seconds,
-                                    max_predictions=max_predictions,
-                                    min_predictions=min_predictions,
+                                    max_predictions=0,
+                                    min_predictions=0,
                                     peak_mode=peak_mode,
+                                    peak_step=peak_step,
                                     time_position=time_position,
+                                    oracle_count=True,
                                 )
                             )
-                    if args.oracle_count:
-                        results.append(
-                            evaluate_entries(
-                                entries,
-                                threshold=threshold,
-                                filter_size=filter_size,
-                                fold_seconds=fold_seconds,
-                                max_predictions=0,
-                                min_predictions=0,
-                                peak_mode=peak_mode,
-                                time_position=time_position,
-                                oracle_count=True,
-                            )
-                        )
 
     results.sort(key=lambda row: row["metrics"][args.sort_metric]["f1"], reverse=True)
     payload = {"split": args.split, "loss": loss, "best": results[:20]}
@@ -237,7 +245,7 @@ def main() -> None:
             f"HR3F={hr3['f1']:.4f} HR3P={hr3['precision']:.4f} HR3R={hr3['recall']:.4f} "
             f"SEG3F={seg3['f1']:.4f} HR.5F={hr05['f1']:.4f} pred={hr3['predicted']} "
             f"threshold={row['threshold']:g} filter={row['filter_size']} "
-            f"peak={row['peak_mode']} time={row['time_position']} "
+            f"peak={row['peak_mode']} step={row['peak_step']} time={row['time_position']} "
             f"max={row['max_predictions_per_song']} min={row['min_predictions_per_song']}"
         )
 

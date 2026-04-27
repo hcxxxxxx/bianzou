@@ -35,7 +35,7 @@ def focused_experiments() -> list[dict]:
             "label_tolerance": 3.0,
             "normalize_mel": True,
             "model_variant": "cnn_lstm",
-            "peak_mode": "maxpool",
+            "peak_mode": "author",
             "time_position": "center",
         },
         {
@@ -44,7 +44,7 @@ def focused_experiments() -> list[dict]:
             "label_tolerance": 3.0,
             "normalize_mel": True,
             "model_variant": "cnn_lstm",
-            "peak_mode": "maxpool",
+            "peak_mode": "author",
             "time_position": "center",
         },
         {
@@ -53,7 +53,7 @@ def focused_experiments() -> list[dict]:
             "label_tolerance": 3.0,
             "normalize_mel": True,
             "model_variant": "cnn_lstm",
-            "peak_mode": "maxpool",
+            "peak_mode": "author",
             "time_position": "start",
         },
         {
@@ -71,7 +71,7 @@ def focused_experiments() -> list[dict]:
             "label_tolerance": 3.0,
             "normalize_mel": False,
             "model_variant": "cnn_lstm",
-            "peak_mode": "maxpool",
+            "peak_mode": "author",
             "time_position": "center",
         },
         {
@@ -80,7 +80,7 @@ def focused_experiments() -> list[dict]:
             "label_tolerance": 2.0,
             "normalize_mel": True,
             "model_variant": "cnn_lstm",
-            "peak_mode": "maxpool",
+            "peak_mode": "author",
             "time_position": "center",
         },
         {
@@ -89,7 +89,7 @@ def focused_experiments() -> list[dict]:
             "label_tolerance": 3.0,
             "normalize_mel": True,
             "model_variant": "mel_lstm",
-            "peak_mode": "maxpool",
+            "peak_mode": "author",
             "time_position": "center",
         },
         {
@@ -98,7 +98,7 @@ def focused_experiments() -> list[dict]:
             "label_tolerance": 3.0,
             "normalize_mel": True,
             "model_variant": "mel_lstm",
-            "peak_mode": "maxpool",
+            "peak_mode": "author",
             "time_position": "center",
         },
     ]
@@ -111,7 +111,7 @@ def full_experiments() -> list[dict]:
         "label_tolerance": [3.0, 2.0],
         "normalize_mel": [True, False],
         "model_variant": ["cnn_lstm", "mel_lstm"],
-        "peak_mode": ["maxpool", "strict"],
+        "peak_mode": ["author", "strict"],
         "time_position": ["center", "start"],
     }
     keys = list(grid)
