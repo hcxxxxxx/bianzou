@@ -48,6 +48,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--embed-dim", type=int, default=24)
     parser.add_argument("--hidden-size", type=int, default=128)
     parser.add_argument("--lstm-layers", type=int, default=2)
+    parser.add_argument(
+        "--model-variant",
+        choices=["cnn_lstm", "mel_lstm"],
+        default="cnn_lstm",
+        help="cnn_lstm follows the paper; mel_lstm skips CNN embedding for ablation.",
+    )
     parser.add_argument("--dropout", type=float, default=0.2)
     parser.add_argument("--batch-size", type=int, default=4)
     parser.add_argument("--epochs", type=int, default=100)
@@ -59,6 +65,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--scheduler-factor", type=float, default=0.5)
     parser.add_argument("--filter-size", type=int, default=9)
     parser.add_argument("--threshold", type=float, default=0.0001)
+    parser.add_argument("--peak-mode", choices=["maxpool", "strict"], default="maxpool")
+    parser.add_argument("--time-position", choices=["center", "start"], default="center")
     parser.add_argument(
         "--threshold-grid",
         type=str,
@@ -157,6 +165,8 @@ def rows_from_prob_entries(
     filter_size: int,
     max_predictions_per_song: int,
     min_predictions_per_song: int,
+    peak_mode: str,
+    time_position: str,
 ) -> list[dict]:
     max_predictions = max_predictions_per_song if max_predictions_per_song > 0 else None
     rows = []
@@ -166,6 +176,8 @@ def rows_from_prob_entries(
             fold_seconds=fold_seconds,
             filter_size=filter_size,
             threshold=threshold,
+            peak_mode=peak_mode,
+            time_position=time_position,
             max_predictions=max_predictions,
             min_predictions=min_predictions_per_song,
         )
@@ -224,6 +236,8 @@ def evaluate(
         filter_size=args.filter_size,
         max_predictions_per_song=args.max_predictions_per_song,
         min_predictions_per_song=args.min_predictions_per_song,
+        peak_mode=args.peak_mode,
+        time_position=args.time_position,
     )
     metrics = evaluate_boundary_predictions(rows)
     return total_loss / max(total_items, 1), metrics, rows, entries
@@ -256,6 +270,8 @@ def select_best_threshold(
             filter_size=args.filter_size,
             max_predictions_per_song=args.max_predictions_per_song,
             min_predictions_per_song=args.min_predictions_per_song,
+            peak_mode=args.peak_mode,
+            time_position=args.time_position,
         )
         metrics = evaluate_boundary_predictions(rows)
         if best_metrics is None or metrics[args.selection_metric]["f1"] > best_metrics[args.selection_metric]["f1"]:
@@ -331,6 +347,7 @@ def main() -> None:
         sr=args.sr,
         hop_length=args.hop_length,
         fold_seconds=args.fold_seconds,
+        model_variant=args.model_variant,
     ).to(device)
 
     criterion = nn.BCEWithLogitsLoss(reduction="none")
@@ -379,12 +396,14 @@ def main() -> None:
             "lr": optimizer.param_groups[0]["lr"],
         }
         history.append(record)
+        hr3_prefix = "" if args.selection_metric == "HR3" else f"HR3F={val_metrics['HR3']['f1']:.4f} "
         print(
             f"epoch {epoch:03d} train_loss={train_loss:.4f} val_loss={val_loss:.4f} "
-            f"{args.selection_metric}F={val_f1:.4f} HR3F={val_metrics['HR3']['f1']:.4f} "
+            f"{args.selection_metric}F={val_f1:.4f} "
+            f"{hr3_prefix}"
             f"HR3P={val_metrics['HR3']['precision']:.4f} "
             f"HR3R={val_metrics['HR3']['recall']:.4f} "
-            f"SEG3F={val_metrics['SEG3']['f1']:.4f} threshold={selected_threshold:.3f}"
+            f"SEG3F={val_metrics['SEG3']['f1']:.4f} threshold={selected_threshold:g}"
         )
 
         if val_f1 > best_f1:

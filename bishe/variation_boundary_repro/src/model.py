@@ -52,16 +52,24 @@ class SACNFolk(nn.Module):
         hop_length: int = 512,
         fold_seconds: float = 1.0,
         init_confidence: float = 0.001,
+        model_variant: str = "cnn_lstm",
     ) -> None:
         super().__init__()
-        del n_mels
         self.sr = sr
         self.hop_length = hop_length
         self.fold_seconds = fold_seconds
+        self.model_variant = model_variant
         self.fold_size = max(1, int(round(fold_seconds * sr / hop_length)))
-        self.embedding = MelEmbedding(embed_dim=embed_dim, dropout=dropout)
+        if model_variant == "cnn_lstm":
+            self.embedding = MelEmbedding(embed_dim=embed_dim, dropout=dropout)
+            lstm_input_dim = embed_dim * self.fold_size
+        elif model_variant == "mel_lstm":
+            self.embedding = None
+            lstm_input_dim = n_mels * self.fold_size
+        else:
+            raise ValueError(f"unknown model variant: {model_variant}")
         self.lstm = nn.LSTM(
-            input_size=embed_dim * self.fold_size,
+            input_size=lstm_input_dim,
             hidden_size=hidden_size,
             num_layers=lstm_layers,
             batch_first=True,
@@ -72,7 +80,10 @@ class SACNFolk(nn.Module):
         nn.init.constant_(self.classifier.bias, logit(init_confidence))
 
     def forward(self, inputs: torch.Tensor, frame_lengths: list[int] | torch.Tensor | None = None) -> torch.Tensor:
-        embeddings = self.embedding(inputs)
+        if self.embedding is None:
+            embeddings = inputs
+        else:
+            embeddings = self.embedding(inputs)
         batch, frames, channels = embeddings.shape
         n_folds = frames // self.fold_size
         if n_folds <= 0:

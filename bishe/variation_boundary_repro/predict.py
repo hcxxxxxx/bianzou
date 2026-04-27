@@ -27,6 +27,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output", type=Path, default=root / "artifacts" / "predictions.json")
     parser.add_argument("--threshold", type=float, default=0.0001)
     parser.add_argument("--filter-size", type=int, default=9)
+    parser.add_argument("--peak-mode", choices=["maxpool", "strict"], default="maxpool")
+    parser.add_argument("--time-position", choices=["center", "start"], default="center")
     parser.add_argument("--max-predictions-per-song", type=int, default=0)
     parser.add_argument("--min-predictions-per-song", type=int, default=0)
     parser.add_argument("--no-normalize-mel", dest="normalize_mel", action="store_false")
@@ -48,6 +50,8 @@ def predict_one(model: SACNFolk, mel_path: Path, args: argparse.Namespace, norma
         fold_seconds=model.fold_size * model.hop_length / model.sr,
         filter_size=args.filter_size,
         threshold=args.threshold,
+        peak_mode=args.peak_mode,
+        time_position=args.time_position,
         max_predictions=args.max_predictions_per_song if args.max_predictions_per_song > 0 else None,
         min_predictions=args.min_predictions_per_song,
     )
@@ -70,6 +74,7 @@ def main() -> None:
         sr=ckpt_args["sr"],
         hop_length=ckpt_args["hop_length"],
         fold_seconds=ckpt_args["fold_seconds"],
+        model_variant=ckpt_args.get("model_variant", "cnn_lstm"),
     ).to(args.device)
     model.load_state_dict(checkpoint["model_state"])
     model.eval()

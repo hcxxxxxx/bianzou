@@ -82,6 +82,12 @@ python3 bishe/variation_boundary_repro/train.py --threshold 0.0001
 python3 bishe/variation_boundary_repro/train.py --threshold 0.001
 ```
 
+Batch-run focused ablations with `batch_size=1` and `filter_size=9`:
+
+```bash
+python3 bishe/variation_boundary_repro/run_experiment_matrix.py --preset focused --device cuda
+```
+
 The paper reports the best hyperparameter set as:
 
 ```text
