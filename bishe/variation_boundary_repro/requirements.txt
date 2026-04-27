@@ -4,4 +4,4 @@ librosa
 soundfile
 scikit-learn
 tqdm
-
+mir_eval

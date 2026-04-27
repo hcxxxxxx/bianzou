@@ -25,7 +25,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--checkpoint", type=Path, default=root / "artifacts" / "checkpoints" / "best.pt")
     parser.add_argument("--filename", type=str, default=None, help="Stem such as 99hh1. Predict all if omitted.")
     parser.add_argument("--output", type=Path, default=root / "artifacts" / "predictions.json")
-    parser.add_argument("--threshold", type=float, default=0.05)
+    parser.add_argument("--threshold", type=float, default=0.0001)
     parser.add_argument("--filter-size", type=int, default=9)
     parser.add_argument("--max-predictions-per-song", type=int, default=0)
     parser.add_argument("--min-predictions-per-song", type=int, default=0)

@@ -63,7 +63,7 @@ python3 bishe/variation_boundary_repro/train.py \
   --hidden-size 128 \
   --lstm-layers 2 \
   --label-tolerance 3.0 \
-  --threshold 0.05
+  --threshold 0.0001
 ```
 
 For closer alignment with the author's feature-saving snippet, disable per-song
@@ -71,6 +71,15 @@ Mel normalization:
 
 ```bash
 python3 bishe/variation_boundary_repro/train.py --no-normalize-mel --tune-threshold --max-predictions-per-song 4
+```
+
+For the author's post-processing setting, do not pass
+`--max-predictions-per-song` or `--min-predictions-per-song`; use pure local
+maxima filtering:
+
+```bash
+python3 bishe/variation_boundary_repro/train.py --threshold 0.0001
+python3 bishe/variation_boundary_repro/train.py --threshold 0.001
 ```
 
 The paper reports the best hyperparameter set as:

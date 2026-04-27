@@ -58,11 +58,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--scheduler-patience", type=int, default=10)
     parser.add_argument("--scheduler-factor", type=float, default=0.5)
     parser.add_argument("--filter-size", type=int, default=9)
-    parser.add_argument("--threshold", type=float, default=0.05)
+    parser.add_argument("--threshold", type=float, default=0.0001)
     parser.add_argument(
         "--threshold-grid",
         type=str,
-        default="0.05,0.10,0.15,0.20,0.25,0.30,0.35,0.40,0.45,0.50,0.60,0.70,0.80",
+        default="0.0001,0.001,0.005,0.01,0.05,0.10,0.15,0.20,0.25,0.30,0.35,0.40,0.45,0.50,0.60,0.70,0.80",
         help="Comma-separated thresholds searched on validation data.",
     )
     parser.add_argument("--tune-threshold", action="store_true")
@@ -79,6 +79,12 @@ def parse_args() -> argparse.Namespace:
         help="Keep at least N strongest local maxima per song after thresholding; 0 disables.",
     )
     parser.add_argument("--device", type=str, default="auto")
+    parser.add_argument(
+        "--selection-metric",
+        choices=["HR3", "SEG3"],
+        default="HR3",
+        help="Metric used for threshold tuning, scheduler, and checkpoint selection.",
+    )
     return parser.parse_args()
 
 
@@ -252,7 +258,7 @@ def select_best_threshold(
             min_predictions_per_song=args.min_predictions_per_song,
         )
         metrics = evaluate_boundary_predictions(rows)
-        if best_metrics is None or metrics["HR3"]["f1"] > best_metrics["HR3"]["f1"]:
+        if best_metrics is None or metrics[args.selection_metric]["f1"] > best_metrics[args.selection_metric]["f1"]:
             best_threshold = threshold
             best_metrics = metrics
     assert best_metrics is not None
@@ -361,7 +367,7 @@ def main() -> None:
                 args,
                 fold_seconds=model.fold_size * args.hop_length / args.sr,
             )
-        val_f1 = val_metrics["HR3"]["f1"]
+        val_f1 = val_metrics[args.selection_metric]["f1"]
         scheduler.step(val_f1)
 
         record = {
@@ -375,8 +381,10 @@ def main() -> None:
         history.append(record)
         print(
             f"epoch {epoch:03d} train_loss={train_loss:.4f} val_loss={val_loss:.4f} "
-            f"HR3F={val_f1:.4f} HR3P={val_metrics['HR3']['precision']:.4f} "
-            f"HR3R={val_metrics['HR3']['recall']:.4f} threshold={selected_threshold:.3f}"
+            f"{args.selection_metric}F={val_f1:.4f} HR3F={val_metrics['HR3']['f1']:.4f} "
+            f"HR3P={val_metrics['HR3']['precision']:.4f} "
+            f"HR3R={val_metrics['HR3']['recall']:.4f} "
+            f"SEG3F={val_metrics['SEG3']['f1']:.4f} threshold={selected_threshold:.3f}"
         )
 
         if val_f1 > best_f1:

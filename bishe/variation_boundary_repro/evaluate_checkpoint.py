@@ -39,7 +39,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--batch-size", type=int, default=4)
     parser.add_argument("--num-workers", type=int, default=0)
     parser.add_argument("--device", type=str, default="auto")
-    parser.add_argument("--threshold-grid", type=str, default="0.05,0.10,0.15,0.20,0.25,0.30,0.35,0.40,0.50,0.60,0.70,0.80")
+    parser.add_argument("--threshold-grid", type=str, default="0.0001,0.001,0.005,0.01,0.05,0.10,0.15,0.20,0.25,0.30,0.35,0.40,0.50,0.60,0.70,0.80")
     parser.add_argument("--filter-size-grid", type=str, default="5,7,9,11,15,21")
     parser.add_argument("--max-predictions-grid", type=str, default="0,1,2,3,4,5,6")
     parser.add_argument("--min-predictions-grid", type=str, default="0")
@@ -58,6 +58,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.set_defaults(normalize_mel=None)
     parser.add_argument("--output", type=Path, default=None)
+    parser.add_argument("--sort-metric", choices=["HR3", "SEG3"], default="HR3")
     return parser.parse_args()
 
 
@@ -209,14 +210,15 @@ def main() -> None:
                     )
                 )
 
-    results.sort(key=lambda row: row["metrics"]["HR3"]["f1"], reverse=True)
+    results.sort(key=lambda row: row["metrics"][args.sort_metric]["f1"], reverse=True)
     payload = {"split": args.split, "loss": loss, "best": results[:20]}
     for row in payload["best"][:10]:
         hr3 = row["metrics"]["HR3"]
         hr05 = row["metrics"]["HR.5"]
+        seg3 = row["metrics"]["SEG3"]
         print(
             f"HR3F={hr3['f1']:.4f} HR3P={hr3['precision']:.4f} HR3R={hr3['recall']:.4f} "
-            f"HR.5F={hr05['f1']:.4f} pred={hr3['predicted']} "
+            f"SEG3F={seg3['f1']:.4f} HR.5F={hr05['f1']:.4f} pred={hr3['predicted']} "
             f"threshold={row['threshold']:.2f} filter={row['filter_size']} "
             f"max={row['max_predictions_per_song']} min={row['min_predictions_per_song']}"
         )

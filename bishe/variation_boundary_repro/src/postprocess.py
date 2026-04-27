@@ -22,7 +22,7 @@ def process_prob_sections(
     probs: torch.Tensor,
     fold_seconds: float = 1.0,
     filter_size: int = 9,
-    threshold: float = 0.05,
+    threshold: float = 0.0001,
     max_predictions: int | None = None,
     min_predictions: int = 0,
 ) -> list[float]:
