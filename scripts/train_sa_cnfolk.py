@@ -29,6 +29,7 @@ from typing import Any
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
 
@@ -402,36 +403,40 @@ class SACNFolkModel(nn.Module):
 
 
 def local_maxima(probs: torch.Tensor | np.ndarray, filter_size: int = 9, step: int = 1) -> tuple[np.ndarray, np.ndarray]:
-    if isinstance(probs, torch.Tensor):
-        arr = probs.detach().cpu().numpy().astype(np.float32).reshape(-1)
-    else:
-        arr = np.asarray(probs, dtype=np.float32).reshape(-1)
+    input_is_numpy = isinstance(probs, np.ndarray)
+    tensor = torch.as_tensor(probs) if input_is_numpy else probs
 
-    if arr.size == 0:
-        return np.zeros(0, dtype=np.float32), np.zeros(0, dtype=np.int64)
+    assert len(tensor.shape) in (1, 2), "Input tensor should have 1 or 2 dimensions"
+    assert filter_size % 2 == 1, "Filter size should be an odd number"
 
-    filter_size = max(int(filter_size), 1)
-    if filter_size % 2 == 0:
-        filter_size += 1
-    half = filter_size // 2
-    step = max(int(step), 1)
+    original_shape = tensor.shape
+    if len(original_shape) == 1:
+        tensor = tensor.unsqueeze(0)  # (1, T)
 
-    out = np.zeros_like(arr, dtype=np.float32)
-    for i in range(0, arr.size, step):
-        left = max(0, i - half)
-        right = min(arr.size, i + half + 1)
-        window = arr[left:right]
-        local_max = np.max(window)
-        if arr[i] < local_max:
-            continue
-        # Suppress plateau maxima to avoid exploding peak counts when probabilities
-        # are locally flat or saturated.
-        tie_count = int(np.isclose(window, local_max, rtol=1e-6, atol=1e-8).sum())
-        if tie_count > 1:
-            continue
-        out[i] = arr[i]
-    idx = np.where(out > 0)[0].astype(np.int64)
-    return out, idx
+    padding = filter_size // 2
+    padded_arr = F.pad(tensor, (padding, padding), mode="constant", value=-torch.inf)
+    rolling_view = padded_arr.unfold(1, filter_size, step)
+
+    center = filter_size // 2
+    local_maxima_mask = torch.eq(rolling_view[:, :, center], torch.max(rolling_view, dim=-1).values)
+    target_tensor = local_maxima_mask
+    if step != 1:
+        target_tensor = torch.zeros(
+            (local_maxima_mask.shape[0], local_maxima_mask.shape[1] * step),
+            dtype=torch.bool,
+            device=local_maxima_mask.device,
+        )
+        for i in range(local_maxima_mask.shape[1]):
+            target_tensor[:, i * step] = local_maxima_mask[:, i]
+        target_tensor = target_tensor[:, : tensor.shape[1]]
+
+    output_arr = torch.zeros_like(tensor)
+    output_arr[target_tensor] = tensor[target_tensor]
+    output_arr = output_arr.reshape(original_shape)
+
+    if input_is_numpy:
+        return output_arr.detach().cpu().numpy(), []
+    return output_arr, []
 
 
 def tensor_to_time(pred_mask: torch.Tensor | np.ndarray, sr: int, hop_length: int) -> list[float]:
