@@ -42,6 +42,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--threshold-grid", type=str, default="0.05,0.10,0.15,0.20,0.25,0.30,0.35,0.40,0.50,0.60,0.70,0.80")
     parser.add_argument("--filter-size-grid", type=str, default="5,7,9,11,15,21")
     parser.add_argument("--max-predictions-grid", type=str, default="0,1,2,3,4,5,6")
+    parser.add_argument("--min-predictions-grid", type=str, default="0")
     parser.add_argument("--oracle-count", action="store_true", help="Diagnostic only: keep top peaks equal to each song's true boundary count.")
     parser.add_argument(
         "--no-normalize-mel",
@@ -109,6 +110,7 @@ def evaluate_entries(
     filter_size: int,
     fold_seconds: float,
     max_predictions: int,
+    min_predictions: int,
     oracle_count: bool = False,
 ) -> dict:
     rows = []
@@ -120,6 +122,7 @@ def evaluate_entries(
             filter_size=filter_size,
             threshold=threshold,
             max_predictions=cap if cap > 0 else None,
+            min_predictions=min_predictions,
         )
         rows.append(
             {
@@ -133,6 +136,7 @@ def evaluate_entries(
         "threshold": threshold,
         "filter_size": filter_size,
         "max_predictions_per_song": "oracle" if oracle_count else max_predictions,
+        "min_predictions_per_song": min_predictions,
         "metrics": metrics,
     }
 
@@ -181,15 +185,17 @@ def main() -> None:
     for filter_size in parse_int_grid(args.filter_size_grid):
         for threshold in parse_float_grid(args.threshold_grid):
             for max_predictions in parse_int_grid(args.max_predictions_grid):
-                results.append(
-                    evaluate_entries(
-                        entries,
-                        threshold=threshold,
-                        filter_size=filter_size,
-                        fold_seconds=fold_seconds,
-                        max_predictions=max_predictions,
+                for min_predictions in parse_int_grid(args.min_predictions_grid):
+                    results.append(
+                        evaluate_entries(
+                            entries,
+                            threshold=threshold,
+                            filter_size=filter_size,
+                            fold_seconds=fold_seconds,
+                            max_predictions=max_predictions,
+                            min_predictions=min_predictions,
+                        )
                     )
-                )
             if args.oracle_count:
                 results.append(
                     evaluate_entries(
@@ -198,6 +204,7 @@ def main() -> None:
                         filter_size=filter_size,
                         fold_seconds=fold_seconds,
                         max_predictions=0,
+                        min_predictions=0,
                         oracle_count=True,
                     )
                 )
@@ -211,7 +218,7 @@ def main() -> None:
             f"HR3F={hr3['f1']:.4f} HR3P={hr3['precision']:.4f} HR3R={hr3['recall']:.4f} "
             f"HR.5F={hr05['f1']:.4f} pred={hr3['predicted']} "
             f"threshold={row['threshold']:.2f} filter={row['filter_size']} "
-            f"max={row['max_predictions_per_song']}"
+            f"max={row['max_predictions_per_song']} min={row['min_predictions_per_song']}"
         )
 
     if args.output is not None:

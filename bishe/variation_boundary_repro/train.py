@@ -72,6 +72,12 @@ def parse_args() -> argparse.Namespace:
         default=0,
         help="Keep only the strongest N local maxima per song; 0 keeps all peaks.",
     )
+    parser.add_argument(
+        "--min-predictions-per-song",
+        type=int,
+        default=0,
+        help="Keep at least N strongest local maxima per song after thresholding; 0 disables.",
+    )
     parser.add_argument("--device", type=str, default="auto")
     return parser.parse_args()
 
@@ -144,6 +150,7 @@ def rows_from_prob_entries(
     fold_seconds: float,
     filter_size: int,
     max_predictions_per_song: int,
+    min_predictions_per_song: int,
 ) -> list[dict]:
     max_predictions = max_predictions_per_song if max_predictions_per_song > 0 else None
     rows = []
@@ -154,6 +161,7 @@ def rows_from_prob_entries(
             filter_size=filter_size,
             threshold=threshold,
             max_predictions=max_predictions,
+            min_predictions=min_predictions_per_song,
         )
         rows.append(
             {
@@ -209,6 +217,7 @@ def evaluate(
         fold_seconds=fold_seconds,
         filter_size=args.filter_size,
         max_predictions_per_song=args.max_predictions_per_song,
+        min_predictions_per_song=args.min_predictions_per_song,
     )
     metrics = evaluate_boundary_predictions(rows)
     return total_loss / max(total_items, 1), metrics, rows, entries
@@ -240,6 +249,7 @@ def select_best_threshold(
             fold_seconds=fold_seconds,
             filter_size=args.filter_size,
             max_predictions_per_song=args.max_predictions_per_song,
+            min_predictions_per_song=args.min_predictions_per_song,
         )
         metrics = evaluate_boundary_predictions(rows)
         if best_metrics is None or metrics["HR3"]["f1"] > best_metrics["HR3"]["f1"]:

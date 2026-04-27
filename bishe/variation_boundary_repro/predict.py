@@ -28,6 +28,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--threshold", type=float, default=0.05)
     parser.add_argument("--filter-size", type=int, default=9)
     parser.add_argument("--max-predictions-per-song", type=int, default=0)
+    parser.add_argument("--min-predictions-per-song", type=int, default=0)
     parser.add_argument("--no-normalize-mel", dest="normalize_mel", action="store_false")
     parser.add_argument("--normalize-mel", dest="normalize_mel", action="store_true")
     parser.set_defaults(normalize_mel=None)
@@ -48,6 +49,7 @@ def predict_one(model: SACNFolk, mel_path: Path, args: argparse.Namespace, norma
         filter_size=args.filter_size,
         threshold=args.threshold,
         max_predictions=args.max_predictions_per_song if args.max_predictions_per_song > 0 else None,
+        min_predictions=args.min_predictions_per_song,
     )
 
 

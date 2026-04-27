@@ -24,10 +24,17 @@ def process_prob_sections(
     filter_size: int = 9,
     threshold: float = 0.05,
     max_predictions: int | None = None,
+    min_predictions: int = 0,
 ) -> list[float]:
     prob_sections = local_maxima(probs.detach().float().cpu(), filter_size=filter_size)
     pred_mask = prob_sections >= threshold
     indices = pred_mask.nonzero(as_tuple=False).flatten()
+    positive_peaks = (prob_sections > 0).nonzero(as_tuple=False).flatten()
+    if min_predictions > 0 and indices.numel() < min_predictions and positive_peaks.numel() > indices.numel():
+        keep_count = min(min_predictions, positive_peaks.numel())
+        values = prob_sections[positive_peaks]
+        order = torch.argsort(values, descending=True)[:keep_count]
+        indices = positive_peaks[order]
     if max_predictions is not None and max_predictions > 0 and indices.numel() > max_predictions:
         values = prob_sections[indices]
         order = torch.argsort(values, descending=True)[:max_predictions]
