@@ -1194,7 +1194,11 @@ def main() -> None:
             f"val_loss={val_metrics['loss']:.4f} "
             f"avg_peaks={val_metrics['avg_pred_peaks']:.2f} "
             f"avg_max_prob={val_metrics['avg_max_prob']:.3f} "
+            f"HR3P={val_metrics['hr3p']:.4f} "
+            f"HR3R={val_metrics['hr3r']:.4f} "
             f"HR3F={val_metrics['hr3f']:.4f} "
+            f"HR.5P={val_metrics['hr05p']:.4f} "
+            f"HR.5R={val_metrics['hr05r']:.4f} "
             f"HR.5F={val_metrics['hr05f']:.4f}"
         )
 
