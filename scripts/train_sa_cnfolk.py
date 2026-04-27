@@ -19,6 +19,7 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 import random
 import re
@@ -72,6 +73,11 @@ def parse_args() -> argparse.Namespace:
     # 后处理参数
     parser.add_argument("--smooth-kernel", type=int, default=9, help="Local-max filter size")
     parser.add_argument("--peak-threshold", type=float, default=0.05, help="Local-max threshold")
+    parser.add_argument(
+        "--export-boundary-diff",
+        action="store_true",
+        help="导出测试集逐首歌的边界预测误差明细（JSON + CSV）",
+    )
 
     parser.add_argument("--device", default="auto", choices=["auto", "cpu", "cuda", "mps"])
     parser.add_argument("--disable-cudnn", action="store_true", help="Disable cuDNN for debugging/stability")
@@ -585,6 +591,126 @@ def match_predictions(pred_times: list[float], true_times: list[float], toleranc
     return precision, recall, f1
 
 
+def build_boundary_match_details(pred_times: list[float], true_times: list[float]) -> dict[str, Any]:
+    """构建逐边界匹配详情（用于分析预测与标注的时间差）。"""
+    pred = [float(t) for t in pred_times]
+    true = [float(t) for t in true_times]
+    matched: list[dict[str, float | bool]] = []
+
+    if pred and true:
+        all_pairs: list[tuple[float, int, int]] = []
+        for i, p in enumerate(pred):
+            for j, t in enumerate(true):
+                all_pairs.append((abs(p - t), i, j))
+        all_pairs.sort(key=lambda x: x[0])
+
+        used_pred: set[int] = set()
+        used_true: set[int] = set()
+        for _abs_err, i, j in all_pairs:
+            if i in used_pred or j in used_true:
+                continue
+            used_pred.add(i)
+            used_true.add(j)
+            err = pred[i] - true[j]
+            matched.append(
+                {
+                    "pred_time": float(pred[i]),
+                    "true_time": float(true[j]),
+                    "error_sec": float(err),
+                    "abs_error_sec": float(abs(err)),
+                    "within_0.5s": bool(abs(err) <= 0.5),
+                    "within_3s": bool(abs(err) <= 3.0),
+                }
+            )
+
+        unmatched_pred = [float(pred[i]) for i in range(len(pred)) if i not in used_pred]
+        unmatched_true = [float(true[j]) for j in range(len(true)) if j not in used_true]
+    else:
+        unmatched_pred = [float(x) for x in pred]
+        unmatched_true = [float(x) for x in true]
+
+    abs_errs = [float(x["abs_error_sec"]) for x in matched]
+    mae = float(np.mean(abs_errs)) if abs_errs else None
+    medae = float(np.median(abs_errs)) if abs_errs else None
+    maxae = float(np.max(abs_errs)) if abs_errs else None
+
+    return {
+        "matched_pairs": matched,
+        "matched_count": len(matched),
+        "unmatched_pred_times": unmatched_pred,
+        "unmatched_true_times": unmatched_true,
+        "false_positive_count": len(unmatched_pred),
+        "false_negative_count": len(unmatched_true),
+        "mae_abs_error_sec": mae,
+        "median_abs_error_sec": medae,
+        "max_abs_error_sec": maxae,
+    }
+
+
+def _fmt_list_for_csv(values: list[float]) -> str:
+    return ";".join(f"{float(v):.3f}" for v in values)
+
+
+def save_boundary_diff_files(run_dir: Path, split_name: str, song_details: list[dict[str, Any]]) -> tuple[Path, Path]:
+    json_path = run_dir / f"boundary_diff_{split_name}.json"
+    csv_path = run_dir / f"boundary_diff_{split_name}.csv"
+
+    # JSON 全量保存，便于后续二次分析/画图。
+    save_json(
+        json_path,
+        {
+            "split": split_name,
+            "num_songs": len(song_details),
+            "songs": song_details,
+        },
+    )
+
+    # CSV 便于快速浏览与筛选。
+    fieldnames = [
+        "song_id",
+        "title",
+        "filename",
+        "duration_sec",
+        "num_true",
+        "num_pred",
+        "matched_count",
+        "false_positive_count",
+        "false_negative_count",
+        "mae_abs_error_sec",
+        "median_abs_error_sec",
+        "max_abs_error_sec",
+        "true_times",
+        "pred_times",
+        "unmatched_true_times",
+        "unmatched_pred_times",
+    ]
+    with csv_path.open("w", encoding="utf-8", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        for row in song_details:
+            writer.writerow(
+                {
+                    "song_id": row.get("song_id"),
+                    "title": row.get("title"),
+                    "filename": row.get("filename"),
+                    "duration_sec": row.get("duration_sec"),
+                    "num_true": row.get("num_true"),
+                    "num_pred": row.get("num_pred"),
+                    "matched_count": row.get("matched_count"),
+                    "false_positive_count": row.get("false_positive_count"),
+                    "false_negative_count": row.get("false_negative_count"),
+                    "mae_abs_error_sec": row.get("mae_abs_error_sec"),
+                    "median_abs_error_sec": row.get("median_abs_error_sec"),
+                    "max_abs_error_sec": row.get("max_abs_error_sec"),
+                    "true_times": _fmt_list_for_csv(row.get("true_times", [])),
+                    "pred_times": _fmt_list_for_csv(row.get("pred_times", [])),
+                    "unmatched_true_times": _fmt_list_for_csv(row.get("unmatched_true_times", [])),
+                    "unmatched_pred_times": _fmt_list_for_csv(row.get("unmatched_pred_times", [])),
+                }
+            )
+    return json_path, csv_path
+
+
 def match_predictions_segment(pre_section: list[float], true_times: list[float], tolerance: float = 3.0) -> tuple[float, float, float]:
     if len(true_times) < 2:
         return 0.0, 0.0, 0.0
@@ -726,7 +852,8 @@ def run_epoch_eval(
     epoch_idx: int,
     debug_batch_crash: bool = False,
     crash_dump_dir: Path | None = None,
-) -> dict[str, float]:
+    collect_song_details: bool = False,
+) -> dict[str, Any]:
     model.train(False)
     total_loss = 0.0
     steps = 0
@@ -735,6 +862,7 @@ def run_epoch_eval(
     sum_p05 = sum_r05 = sum_f05 = 0.0
     peak_count_total = 0
     max_prob_total = 0.0
+    song_details: list[dict[str, Any]] = []
 
     for step, batch in enumerate(loader, start=1):
         x = None
@@ -788,6 +916,28 @@ def run_epoch_eval(
             true_for_seg = build_segment_boundaries(true_times_internal, song_duration_sec)
             p3, r3, f3 = match_predictions_segment(pre_for_seg, true_for_seg, tolerance=3.0)
 
+            if collect_song_details:
+                detail = build_boundary_match_details(pred_times, true_times_internal)
+                song_details.append(
+                    {
+                        "song_id": batch.get("song_id"),
+                        "title": batch.get("title"),
+                        "filename": batch.get("filename"),
+                        "duration_sec": float(song_duration_sec),
+                        "num_true": len(true_times_internal),
+                        "num_pred": len(pred_times),
+                        "true_times": [float(t) for t in true_times_internal],
+                        "pred_times": [float(t) for t in pred_times],
+                        "p05": float(p05),
+                        "r05": float(r05),
+                        "f05": float(f05),
+                        "p3": float(p3),
+                        "r3": float(r3),
+                        "f3": float(f3),
+                        **detail,
+                    }
+                )
+
             sum_p3 += p3
             sum_r3 += r3
             sum_f3 += f3
@@ -831,7 +981,7 @@ def run_epoch_eval(
     f05 = sum_f05 / max(1, steps)
     avg_pred_peaks = peak_count_total / max(1, steps)
     avg_max_prob = max_prob_total / max(1, steps)
-    return {
+    out = {
         "loss": total_loss / max(1, steps),
         "num_songs": float(steps),
         "skipped_songs": float(skipped),
@@ -844,6 +994,9 @@ def run_epoch_eval(
         "hr05r": r05,
         "hr05f": f05,
     }
+    if collect_song_details:
+        out["song_details"] = song_details
+    return out
 
 
 def main() -> None:
@@ -1093,11 +1246,21 @@ def main() -> None:
         epoch_idx=best_epoch,
         debug_batch_crash=args.debug_batch_crash,
         crash_dump_dir=crash_dump_dir,
+        collect_song_details=args.export_boundary_diff,
     )
+    test_song_details = test_metrics.pop("song_details", None)
     save_json(
         run_dir / "final_report.json",
         {"best_epoch": best_epoch, "best_hr3f": best_hr3f, "best_val_loss": best_val_loss, "test_metrics": test_metrics},
     )
+    if test_song_details is not None:
+        json_path, csv_path = save_boundary_diff_files(
+            run_dir=run_dir,
+            split_name="test",
+            song_details=test_song_details,
+        )
+        print(f"boundary_diff_json: {json_path}")
+        print(f"boundary_diff_csv: {csv_path}")
 
     print("=== SA-CNFolk Training Done ===")
     print(f"best_epoch: {best_epoch}")
