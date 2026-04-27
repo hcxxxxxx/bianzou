@@ -322,35 +322,26 @@ def collate_batch_size_one(batch: list[dict[str, Any]]) -> dict[str, Any]:
         raise ValueError("batch_size must be 1")
     return batch[0]
 
-
 class Head(nn.Module):
-    """作者补充的分类头实现（按时间维输出边界 logits）。"""
-
-    def __init__(self, dim_embed: int, num_classes: int, init_confidence: float | None = None):
+    def __init__(self,  num_classes: int, init_confidence: float = None):
         super().__init__()
+        num_instruments = 1
         self.classifier = nn.Linear(dim_embed, num_classes)
+
         if init_confidence is not None:
             self.reset_parameters(init_confidence)
 
-    def reset_parameters(self, confidence: float) -> None:
-        if not (0.0 < confidence < 1.0):
-            raise ValueError("init_confidence 必须位于 (0, 1) 区间")
-        bias = -torch.log(torch.tensor(1.0 / confidence - 1.0, dtype=self.classifier.bias.dtype))
-        with torch.no_grad():
-            self.classifier.bias.fill_(float(bias.item()))
+    def reset_parameters(self, confidence) -> None:
+        self.classifier.bias.data.fill_(-torch.log(torch.tensor(1 / confidence - 1)))
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # 支持 (B, T, E) 或 (B, I, T, E) 两种输入形状。
-        if x.dim() == 3:
-            x = x.unsqueeze(1)  # (B, 1, T, E)
-        if x.dim() != 4:
-            raise ValueError(f"Head 输入维度应为 3 或 4，当前为 {x.dim()}")
-
+    def forward(self, x: torch.FloatTensor):
         batch, inst, frame, embed = x.shape
-        x = x.permute(0, 2, 1, 3).reshape(batch, frame, inst * embed)
-        logits = self.classifier(x).permute(0, 2, 1)
+        x = x.permute(0, 2, 1, 3)
+        x = x.reshape(batch, frame, inst * embed)
+        logits = self.classifier(x)
+        logits = logits.permute(0, 2, 1)
         if logits.shape[1] == 1:
-            logits = logits.squeeze(1)  # (B, T)
+            logits = logits.squeeze(1)
         return logits
 
 
@@ -410,7 +401,7 @@ class SACNFolkModel(nn.Module):
             batch_first=True,
             bidirectional=True,
         )
-        self.classifier = Head(dim_embed=2 * hidden_size, num_classes=1)
+        self.classifier = nn.Linear(2 * hidden_size, 1)#TODO:换成上面的Head类, 初始化有一点小区别.
 
     def _aggregate_windows(self, emb: torch.Tensor) -> torch.Tensor:
         # emb 形状: (B, T, sigma) -> (B, T/w, w*sigma)
@@ -429,11 +420,7 @@ class SACNFolkModel(nn.Module):
             # 防御极短输入（长度小于一个聚合窗口）。
             return torch.empty(0, device=x_tf.device, dtype=x_tf.dtype)
         out, _ = self.lstm(agg)
-        logits = self.classifier(out)
-        if logits.dim() == 2:
-            logits = logits.squeeze(0)
-        else:
-            logits = logits.squeeze(-1).squeeze(0)
+        logits = self.classifier(out).squeeze(-1).squeeze(0)  # (T/w,)
         return logits
 
 
@@ -901,7 +888,7 @@ def main() -> None:
     crash_dump_dir = run_dir / "crash_debug" if args.debug_batch_crash else None
     if crash_dump_dir is not None:
         crash_dump_dir.mkdir(parents=True, exist_ok=True)
-
+#TODO: 在train前要有一个model.train(), eval 和valid前要有model.eval()
     for epoch in range(1, args.epochs + 1):
         epoch_t0 = time.perf_counter()
         lr = float(optimizer.param_groups[0]["lr"])
