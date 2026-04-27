@@ -21,6 +21,7 @@ from __future__ import annotations
 import argparse
 import json
 import random
+import re
 import time
 from collections import defaultdict
 from pathlib import Path
@@ -167,45 +168,111 @@ def load_records(dataset_json: Path) -> list[dict[str, Any]]:
     return records
 
 
-def split_by_title(records: list[dict[str, Any]], seed: int) -> dict[str, list[dict[str, Any]]]:
-    """先按 unique 歌名做 8:1:1，再将该歌名下全部版本整体归入对应集合。"""
-    groups: dict[str, list[dict[str, Any]]] = defaultdict(list)
-    for rec in records:
-        groups[str(rec["title"])].append(rec)
+def extract_music_id(filename: str) -> str | None:
+    """从文件名提取 music_id：优先字母前缀；否则去掉末尾数字。"""
+    stem = Path(str(filename)).stem
+    m = re.match(r"([a-zA-Z]+)", stem)
+    if m:
+        return m.group(1)
+    # 兼容如 99hh1 这种“数字+字母+数字”命名。
+    m = re.match(r"^(.*?)(\d+)$", stem)
+    if m and m.group(1):
+        return m.group(1)
+    return stem if stem else None
 
+
+def split_by_title(records: list[dict[str, Any]], seed: int) -> tuple[dict[str, list[dict[str, Any]]], dict[str, Any]]:
+    """按作者参考逻辑分层划分：region -> music_id -> 文件集合。"""
     rng = random.Random(seed)
-    unique_titles = sorted(groups.keys())
-    rng.shuffle(unique_titles)
 
-    n_titles = len(unique_titles)
-    n_train_titles = int(round(n_titles * 0.8))
-    n_val_titles = int(round(n_titles * 0.1))
-    n_test_titles = n_titles - n_train_titles - n_val_titles
+    # 构建: region -> music_id -> [records]
+    region_music_records: dict[str, dict[str, list[dict[str, Any]]]] = defaultdict(lambda: defaultdict(list))
+    dropped_missing_region = 0
+    dropped_missing_music_id = 0
+    dropped_missing_boundary = 0
+    for rec in records:
+        boundary_times = rec.get("boundary_times")
+        if boundary_times is None:
+            dropped_missing_boundary += 1
+            continue
 
-    train_titles = set(unique_titles[:n_train_titles])
-    val_titles = set(unique_titles[n_train_titles : n_train_titles + n_val_titles])
-    test_titles = set(unique_titles[n_train_titles + n_val_titles :])
-    if len(test_titles) != n_test_titles:
-        raise RuntimeError("title split size mismatch")
+        region = rec.get("region")
+        music_id = extract_music_id(str(rec.get("filename", "")))
+        if not region:
+            dropped_missing_region += 1
+            continue
+        if not music_id:
+            dropped_missing_music_id += 1
+            continue
+        region_music_records[str(region)][music_id].append(rec)
 
-    splits = {"train": [], "val": [], "test": []}
-    for title in train_titles:
-        splits["train"].extend(groups[title])
-    for title in val_titles:
-        splits["val"].extend(groups[title])
-    for title in test_titles:
-        splits["test"].extend(groups[title])
+    train_records: list[dict[str, Any]] = []
+    val_records: list[dict[str, Any]] = []
+    test_records: list[dict[str, Any]] = []
 
-    # 防止同名歌曲跨集合泄漏
-    title_sets = {name: {str(r["title"]) for r in recs} for name, recs in splits.items()}
-    if title_sets["train"] & title_sets["val"]:
-        raise RuntimeError("title leakage between train/val")
-    if title_sets["train"] & title_sets["test"]:
-        raise RuntimeError("title leakage between train/test")
-    if title_sets["val"] & title_sets["test"]:
-        raise RuntimeError("title leakage between val/test")
+    used_regions = 0
+    skipped_regions = 0
+    dropped_small_region_records = 0
 
-    return splits
+    for _region, music_to_records in region_music_records.items():
+        music_ids = list(music_to_records.keys())
+        if len(music_ids) < 4:
+            # 参考作者逻辑：跳过不满足条件的地域。
+            skipped_regions += 1
+            dropped_small_region_records += sum(len(v) for v in music_to_records.values())
+            continue
+
+        used_regions += 1
+        rng.shuffle(music_ids)
+        n = len(music_ids)
+        n_train = int(n * 0.8)
+        n_val = int(n * 0.1)
+
+        train_ids = music_ids[:n_train]
+        val_ids = music_ids[n_train : n_train + n_val]
+        test_ids = music_ids[n_train + n_val :]
+
+        # 确保 test 每个 region 至少有 1 个 music_id。
+        if len(test_ids) == 0:
+            if len(val_ids) > 0:
+                test_ids.append(val_ids.pop())
+            elif len(train_ids) > 0:
+                test_ids.append(train_ids.pop())
+
+        for music_id in train_ids:
+            train_records.extend(music_to_records[music_id])
+        for music_id in val_ids:
+            val_records.extend(music_to_records[music_id])
+        for music_id in test_ids:
+            test_records.extend(music_to_records[music_id])
+
+    splits = {"train": train_records, "val": val_records, "test": test_records}
+
+    # 防止 music_id 跨集合泄漏
+    split_music_ids: dict[str, set[str]] = {"train": set(), "val": set(), "test": set()}
+    for split_name, recs in splits.items():
+        for rec in recs:
+            music_id = extract_music_id(str(rec.get("filename", "")))
+            if music_id:
+                split_music_ids[split_name].add(music_id)
+    if split_music_ids["train"] & split_music_ids["val"]:
+        raise RuntimeError("music_id leakage between train/val")
+    if split_music_ids["train"] & split_music_ids["test"]:
+        raise RuntimeError("music_id leakage between train/test")
+    if split_music_ids["val"] & split_music_ids["test"]:
+        raise RuntimeError("music_id leakage between val/test")
+
+    split_meta: dict[str, Any] = {
+        "strategy": "region_music_id",
+        "regions_total": len(region_music_records),
+        "regions_used": used_regions,
+        "regions_skipped_lt4": skipped_regions,
+        "records_dropped_missing_region": dropped_missing_region,
+        "records_dropped_missing_music_id": dropped_missing_music_id,
+        "records_dropped_missing_boundary_times": dropped_missing_boundary,
+        "records_dropped_small_region": dropped_small_region_records,
+    }
+    return splits, split_meta
 
 
 def maybe_extract_mel(records: list[dict[str, Any]], root: Path, feature_dir: Path, args: argparse.Namespace) -> None:
@@ -804,7 +871,7 @@ def main() -> None:
     records = load_records(dataset_json)
     maybe_extract_mel(records, root=root, feature_dir=feature_dir, args=args)
     validate_features(records, feature_dir=feature_dir, n_mels=args.n_mels)
-    splits = split_by_title(records, seed=args.seed)
+    splits, split_meta = split_by_title(records, seed=args.seed)
 
     train_ds = MelBoundaryDataset(
         records=splits["train"],
@@ -868,10 +935,13 @@ def main() -> None:
         "n_train": len(splits["train"]),
         "n_val": len(splits["val"]),
         "n_test": len(splits["test"]),
+        "n_used": len(splits["train"]) + len(splits["val"]) + len(splits["test"]),
+        "n_dropped": len(records) - (len(splits["train"]) + len(splits["val"]) + len(splits["test"])),
         "n_titles_total": len({r["title"] for r in records}),
         "n_titles_train": len({r["title"] for r in splits["train"]}),
         "n_titles_val": len({r["title"] for r in splits["val"]}),
         "n_titles_test": len({r["title"] for r in splits["test"]}),
+        "split_meta": split_meta,
     }
     save_json(
         run_dir / "config.json",
@@ -894,13 +964,24 @@ def main() -> None:
     print(f"cudnn_enabled: {torch.backends.cudnn.enabled}")
     print(f"debug_batch_crash: {args.debug_batch_crash}")
     print(f"grad_accum_steps: {max(1, args.grad_accum_steps)}")
-    print(f"split: train={split_summary['n_train']} val={split_summary['n_val']} test={split_summary['n_test']}")
+    print(
+        f"split: train={split_summary['n_train']} "
+        f"val={split_summary['n_val']} "
+        f"test={split_summary['n_test']} "
+        f"(used={split_summary['n_used']}, dropped={split_summary['n_dropped']})"
+    )
     print(
         "split_titles: "
         f"train={split_summary['n_titles_train']} "
         f"val={split_summary['n_titles_val']} "
         f"test={split_summary['n_titles_test']} "
         f"(total={split_summary['n_titles_total']})"
+    )
+    print(
+        "split_regions: "
+        f"used={split_meta['regions_used']} "
+        f"skipped_lt4={split_meta['regions_skipped_lt4']} "
+        f"total={split_meta['regions_total']}"
     )
     crash_dump_dir = run_dir / "crash_debug" if args.debug_batch_crash else None
     if crash_dump_dir is not None:
