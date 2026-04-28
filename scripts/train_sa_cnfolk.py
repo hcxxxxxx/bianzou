@@ -188,86 +188,59 @@ def extract_music_id(filename: str) -> str | None:
 
 
 def split_by_title(records: list[dict[str, Any]], seed: int) -> tuple[dict[str, list[dict[str, Any]]], dict[str, Any]]:
-    """按作者参考逻辑分层划分：region -> music_id -> 文件集合。"""
+    """全局按 unique 曲名做 8:1:1 划分，并保持同曲不同版本不跨集合。"""
     rng = random.Random(seed)
-
-    # 构建: region -> music_id -> [records]
-    region_music_records: dict[str, dict[str, list[dict[str, Any]]]] = defaultdict(lambda: defaultdict(list))
-    dropped_missing_region = 0
-    dropped_missing_music_id = 0
+    title_groups: dict[str, list[dict[str, Any]]] = defaultdict(list)
     dropped_missing_boundary = 0
+    dropped_missing_title = 0
     for rec in records:
         boundary_times = rec.get("boundary_times")
         if boundary_times is None:
             dropped_missing_boundary += 1
             continue
-
-        region = rec.get("region")
-        music_id = extract_music_id(str(rec.get("filename", "")))
-        if not region:
-            dropped_missing_region += 1
+        title = str(rec.get("title", "")).strip()
+        if not title:
+            dropped_missing_title += 1
             continue
-        if not music_id:
-            dropped_missing_music_id += 1
-            continue
-        region_music_records[str(region)][music_id].append(rec)
+        title_groups[title].append(rec)
 
-    train_records: list[dict[str, Any]] = []
-    val_records: list[dict[str, Any]] = []
-    test_records: list[dict[str, Any]] = []
+    unique_titles = sorted(title_groups.keys())
+    rng.shuffle(unique_titles)
+    n_titles = len(unique_titles)
+    n_train_titles = int(round(n_titles * 0.8))
+    n_val_titles = int(round(n_titles * 0.1))
+    n_test_titles = n_titles - n_train_titles - n_val_titles
 
-    used_regions = 0
+    train_titles = set(unique_titles[:n_train_titles])
+    val_titles = set(unique_titles[n_train_titles : n_train_titles + n_val_titles])
+    test_titles = set(unique_titles[n_train_titles + n_val_titles :])
+    if len(test_titles) != n_test_titles:
+        raise RuntimeError("title split size mismatch")
 
-    for _region, music_to_records in region_music_records.items():
-        music_ids = list(music_to_records.keys())
+    splits = {"train": [], "val": [], "test": []}
+    for title in train_titles:
+        splits["train"].extend(title_groups[title])
+    for title in val_titles:
+        splits["val"].extend(title_groups[title])
+    for title in test_titles:
+        splits["test"].extend(title_groups[title])
 
-        used_regions += 1
-        rng.shuffle(music_ids)
-        n = len(music_ids)
-        n_train = int(n * 0.8)
-        n_val = int(n * 0.1)
-
-        train_ids = music_ids[:n_train]
-        val_ids = music_ids[n_train : n_train + n_val]
-        test_ids = music_ids[n_train + n_val :]
-
-        # 确保 test 每个 region 至少有 1 个 music_id。
-        if len(test_ids) == 0:
-            if len(val_ids) > 0:
-                test_ids.append(val_ids.pop())
-            elif len(train_ids) > 0:
-                test_ids.append(train_ids.pop())
-
-        for music_id in train_ids:
-            train_records.extend(music_to_records[music_id])
-        for music_id in val_ids:
-            val_records.extend(music_to_records[music_id])
-        for music_id in test_ids:
-            test_records.extend(music_to_records[music_id])
-
-    splits = {"train": train_records, "val": val_records, "test": test_records}
-
-    # 防止 (region, music_id) 跨集合泄漏
-    split_music_ids: dict[str, set[tuple[str, str]]] = {"train": set(), "val": set(), "test": set()}
-    for split_name, recs in splits.items():
-        for rec in recs:
-            region = str(rec.get("region", ""))
-            music_id = extract_music_id(str(rec.get("filename", "")))
-            if region and music_id:
-                split_music_ids[split_name].add((region, music_id))
-    if split_music_ids["train"] & split_music_ids["val"]:
-        raise RuntimeError("music_id leakage between train/val")
-    if split_music_ids["train"] & split_music_ids["test"]:
-        raise RuntimeError("music_id leakage between train/test")
-    if split_music_ids["val"] & split_music_ids["test"]:
-        raise RuntimeError("music_id leakage between val/test")
+    # 防止同名歌曲跨集合泄漏
+    title_sets = {name: {str(r["title"]) for r in recs} for name, recs in splits.items()}
+    if title_sets["train"] & title_sets["val"]:
+        raise RuntimeError("title leakage between train/val")
+    if title_sets["train"] & title_sets["test"]:
+        raise RuntimeError("title leakage between train/test")
+    if title_sets["val"] & title_sets["test"]:
+        raise RuntimeError("title leakage between val/test")
 
     split_meta: dict[str, Any] = {
-        "strategy": "region_music_id",
-        "regions_total": len(region_music_records),
-        "regions_used": used_regions,
-        "records_dropped_missing_region": dropped_missing_region,
-        "records_dropped_missing_music_id": dropped_missing_music_id,
+        "strategy": "global_title",
+        "titles_total": n_titles,
+        "titles_train": len(train_titles),
+        "titles_val": len(val_titles),
+        "titles_test": len(test_titles),
+        "records_dropped_missing_title": dropped_missing_title,
         "records_dropped_missing_boundary_times": dropped_missing_boundary,
     }
     return splits, split_meta
@@ -1151,10 +1124,10 @@ def main() -> None:
         f"(total={split_summary['n_titles_total']})"
     )
     print(
-        "split_regions: "
-        f"used={split_meta['regions_used']} "
-        "skipped_lt4=0(disabled) "
-        f"total={split_meta['regions_total']}"
+        "split_strategy: "
+        f"{split_meta.get('strategy', 'unknown')} "
+        f"(titles {split_meta.get('titles_train', '?')}/{split_meta.get('titles_val', '?')}/{split_meta.get('titles_test', '?')}, "
+        f"total={split_meta.get('titles_total', '?')})"
     )
     crash_dump_dir = run_dir / "crash_debug" if args.debug_batch_crash else None
     if crash_dump_dir is not None:
