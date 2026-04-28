@@ -217,8 +217,6 @@ def split_by_title(records: list[dict[str, Any]], seed: int) -> tuple[dict[str, 
     test_records: list[dict[str, Any]] = []
 
     used_regions = 0
-    skipped_regions = 0
-    dropped_small_region_records = 0
 
     for _region, music_to_records in region_music_records.items():
         music_ids = list(music_to_records.keys())
@@ -268,12 +266,9 @@ def split_by_title(records: list[dict[str, Any]], seed: int) -> tuple[dict[str, 
         "strategy": "region_music_id",
         "regions_total": len(region_music_records),
         "regions_used": used_regions,
-        # 暂时关闭“小于4首曲目地域剔除”逻辑，保留字段用于兼容既有日志解析。
-        "regions_skipped_lt4": skipped_regions,
         "records_dropped_missing_region": dropped_missing_region,
         "records_dropped_missing_music_id": dropped_missing_music_id,
         "records_dropped_missing_boundary_times": dropped_missing_boundary,
-        "records_dropped_small_region": dropped_small_region_records,
     }
     return splits, split_meta
 
@@ -1158,7 +1153,7 @@ def main() -> None:
     print(
         "split_regions: "
         f"used={split_meta['regions_used']} "
-        f"skipped_lt4={split_meta['regions_skipped_lt4']} "
+        "skipped_lt4=0(disabled) "
         f"total={split_meta['regions_total']}"
     )
     crash_dump_dir = run_dir / "crash_debug" if args.debug_batch_crash else None
