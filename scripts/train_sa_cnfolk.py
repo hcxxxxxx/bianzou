@@ -325,6 +325,26 @@ def validate_features(records: list[dict[str, Any]], feature_dir: Path, n_mels: 
         raise ValueError("Bad Mel feature shape, sample:\n" + "\n".join(bad[:10]))
 
 
+def sanitize_boundary_times(
+    boundary_times: list[float],
+    duration_sec: float | None = None,
+    eps: float = 1e-6,
+    start_margin_sec: float = 0.0,
+    end_margin_sec: float = 0.0,
+) -> list[float]:
+    """仅保留内部边界：去掉首尾边界并做去重。"""
+    times = sorted(float(t) for t in boundary_times)
+    cleaned: list[float] = []
+    for t in times:
+        if t <= max(eps, float(start_margin_sec)):
+            continue
+        if duration_sec is not None and t >= (float(duration_sec) - max(eps, float(end_margin_sec))):
+            continue
+        if not cleaned or abs(t - cleaned[-1]) > eps:
+            cleaned.append(t)
+    return cleaned
+
+
 class MelBoundaryDataset(Dataset):
     def __init__(
         self,
@@ -369,8 +389,13 @@ class MelBoundaryDataset(Dataset):
         feat = np.load(self.feature_dir / f"{fid}.npy")  # (n_mels, T)
         feat = feat.T.astype(np.float32)  # (T, n_mels)
 
-        # 默认假设 boundary_times 已在数据集中预处理完成。
-        boundary_times = sorted(float(t) for t in rec["boundary_times"])
+        duration_sec = float(feat.shape[0]) * self.frame_duration
+        boundary_times = sanitize_boundary_times(
+            [float(t) for t in rec["boundary_times"]],
+            duration_sec=duration_sec,
+            start_margin_sec=self.frame_duration,
+            end_margin_sec=self.frame_duration,
+        )
         y = self._frame_labels(boundary_times, feat.shape[0])  # (T,)
         y_fold = self._fold_mean(y[:, None]).squeeze(-1).astype(np.float32)  # (T/w,)
 
@@ -742,20 +767,10 @@ def match_predictions_segment(pre_section: list[float], true_times: list[float],
 
 
 def build_segment_boundaries(boundary_times: list[float], duration_sec: float) -> list[float]:
-    """将内部边界补全为完整边界列表 [0, ..., duration]。"""
-    eps = 1e-6
-    if duration_sec <= eps:
+    """仅保留内部边界（不自动加入起点/终点）。"""
+    if duration_sec <= 1e-6:
         return []
-    mids = sorted(float(t) for t in boundary_times if eps < float(t) < (duration_sec - eps))
-    out = [0.0] + mids + [float(duration_sec)]
-    # 去重并保证严格单调递增。
-    cleaned: list[float] = []
-    for t in out:
-        if not cleaned or (t - cleaned[-1]) > eps:
-            cleaned.append(t)
-    if len(cleaned) < 2:
-        cleaned = [0.0, float(duration_sec)]
-    return cleaned
+    return sanitize_boundary_times(boundary_times, duration_sec=duration_sec)
 
 
 def run_epoch_train(
@@ -901,20 +916,33 @@ def run_epoch_eval(
                 threshold=peak_threshold,
             )
 
+            song_duration_sec = float(batch["x"].shape[0] * (hop_length / sr))
+            edge_margin_true = hop_length / sr
+            edge_margin_pred = effective_hop / sr
+            true_times_internal = sanitize_boundary_times(
+                [float(t) for t in batch["boundary_times"]],
+                duration_sec=song_duration_sec,
+                start_margin_sec=edge_margin_true,
+                end_margin_sec=edge_margin_true,
+            )
+            pred_times_internal = sanitize_boundary_times(
+                pred_times,
+                duration_sec=song_duration_sec,
+                start_margin_sec=edge_margin_pred,
+                end_margin_sec=edge_margin_pred,
+            )
+
             probs_np = probs.detach().cpu().numpy().astype(np.float32).reshape(-1)
-            peak_count_total += len(pred_times)
+            peak_count_total += len(pred_times_internal)
             max_prob_total += float(probs_np.max()) if probs_np.size > 0 else 0.0
 
-            true_times_internal = sorted(float(t) for t in batch["boundary_times"])
-            song_duration_sec = float(batch["x"].shape[0] * (hop_length / sr))
-
-            p05, r05, f05 = match_predictions(pred_times, true_times_internal, tolerance=0.5)
-            pre_for_seg = build_segment_boundaries(pred_times, song_duration_sec)
+            p05, r05, f05 = match_predictions(pred_times_internal, true_times_internal, tolerance=0.5)
+            pre_for_seg = build_segment_boundaries(pred_times_internal, song_duration_sec)
             true_for_seg = build_segment_boundaries(true_times_internal, song_duration_sec)
             p3, r3, f3 = match_predictions_segment(pre_for_seg, true_for_seg, tolerance=3.0)
 
             if collect_song_details:
-                detail = build_boundary_match_details(pred_times, true_times_internal)
+                detail = build_boundary_match_details(pred_times_internal, true_times_internal)
                 song_details.append(
                     {
                         "song_id": batch.get("song_id"),
@@ -922,9 +950,9 @@ def run_epoch_eval(
                         "filename": batch.get("filename"),
                         "duration_sec": float(song_duration_sec),
                         "num_true": len(true_times_internal),
-                        "num_pred": len(pred_times),
+                        "num_pred": len(pred_times_internal),
                         "true_times": [float(t) for t in true_times_internal],
-                        "pred_times": [float(t) for t in pred_times],
+                        "pred_times": [float(t) for t in pred_times_internal],
                         "p05": float(p05),
                         "r05": float(r05),
                         "f05": float(f05),
