@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 
 # 一键对比脚本：
-# 固定 smooth-kernel=9，批量扫描 w_seconds 与 peak-threshold 组合，
+# 固定 w_seconds=1.0、peak-threshold=0.005，批量扫描 smooth-kernel 组合，
 # 每组实验写入独立 run_dir，并在结束后汇总结果到 summary.csv。
 #
 # 用法：
@@ -39,9 +39,12 @@ COMMON_ARGS=(
   --export-boundary-diff
 )
 
+# 固定参数
+FIXED_W_SECONDS="1.0"
+FIXED_PEAK_THRESHOLD="0.005"
+
 # 扫描组合
-W_LIST=("1.0" "0.5")
-THRESHOLD_LIST=("0.0005" "0.001" "0.002" "0.005")
+KERNEL_LIST=("7" "9" "11" "13")
 
 TS="$(date +%Y%m%d_%H%M%S)"
 EXP_ROOT="runs/compare_w_th_${TS}"
@@ -53,27 +56,26 @@ echo "exp_root:     $EXP_ROOT"
 echo
 
 run_idx=0
-for w in "${W_LIST[@]}"; do
-  for th in "${THRESHOLD_LIST[@]}"; do
-    run_idx=$((run_idx + 1))
-    w_tag="${w/./p}"
-    th_tag="${th/./p}"
-    run_dir="${EXP_ROOT}/run_${run_idx}_w${w_tag}_th${th_tag}"
+for k in "${KERNEL_LIST[@]}"; do
+  run_idx=$((run_idx + 1))
+  w_tag="${FIXED_W_SECONDS/./p}"
+  th_tag="${FIXED_PEAK_THRESHOLD/./p}"
+  run_dir="${EXP_ROOT}/run_${run_idx}_w${w_tag}_th${th_tag}_k${k}"
 
-    echo "---- [${run_idx}] w_seconds=${w}, peak_threshold=${th} ----"
-    echo "run_dir: ${run_dir}"
+  echo "---- [${run_idx}] w_seconds=${FIXED_W_SECONDS}, peak_threshold=${FIXED_PEAK_THRESHOLD}, smooth_kernel=${k} ----"
+  echo "run_dir: ${run_dir}"
 
-    if python "$TRAIN_SCRIPT" \
-      "${COMMON_ARGS[@]}" \
-      --w-seconds "$w" \
-      --peak-threshold "$th" \
-      --run-dir "$run_dir"; then
-      echo "[OK] run_${run_idx}"
-    else
-      echo "[FAIL] run_${run_idx}" | tee -a "${EXP_ROOT}/failed_runs.txt"
-    fi
-    echo
-  done
+  if python "$TRAIN_SCRIPT" \
+    "${COMMON_ARGS[@]}" \
+    --w-seconds "$FIXED_W_SECONDS" \
+    --peak-threshold "$FIXED_PEAK_THRESHOLD" \
+    --smooth-kernel "$k" \
+    --run-dir "$run_dir"; then
+    echo "[OK] run_${run_idx}"
+  else
+    echo "[FAIL] run_${run_idx}" | tee -a "${EXP_ROOT}/failed_runs.txt"
+  fi
+  echo
 done
 
 python3 - "$EXP_ROOT" <<'PY'
@@ -97,6 +99,7 @@ for run_dir in sorted(exp_root.glob("run_*")):
                 "peak_threshold": "",
                 "best_epoch": "",
                 "best_val_hr3f": "",
+                "smooth_kernel": "",
                 "test_hr3f": "",
                 "test_hr3p": "",
                 "test_hr3r": "",
@@ -119,6 +122,7 @@ for run_dir in sorted(exp_root.glob("run_*")):
             "peak_threshold": args.get("peak_threshold", ""),
             "best_epoch": rep.get("best_epoch", ""),
             "best_val_hr3f": rep.get("best_hr3f", ""),
+            "smooth_kernel": args.get("smooth_kernel", ""),
             "test_hr3f": test.get("hr3f", ""),
             "test_hr3p": test.get("hr3p", ""),
             "test_hr3r": test.get("hr3r", ""),
@@ -144,6 +148,7 @@ fieldnames = [
     "peak_threshold",
     "best_epoch",
     "best_val_hr3f",
+    "smooth_kernel",
     "test_hr3f",
     "test_hr3p",
     "test_hr3r",
@@ -162,7 +167,7 @@ print("top runs by test_hr3f:")
 for r in rows[:5]:
     print(
         f"- {r['run_dir']}: "
-        f"w={r['w_seconds']}, th={r['peak_threshold']}, "
+        f"w={r['w_seconds']}, th={r['peak_threshold']}, k={r['smooth_kernel']}, "
         f"HR3F={r['test_hr3f']}, HR3P={r['test_hr3p']}, HR3R={r['test_hr3r']}, HR.5F={r['test_hr05f']}"
     )
 PY
