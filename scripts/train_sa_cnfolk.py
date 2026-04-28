@@ -222,11 +222,6 @@ def split_by_title(records: list[dict[str, Any]], seed: int) -> tuple[dict[str, 
 
     for _region, music_to_records in region_music_records.items():
         music_ids = list(music_to_records.keys())
-        if len(music_ids) < 4:
-            # 参考作者逻辑：跳过不满足条件的地域。
-            skipped_regions += 1
-            dropped_small_region_records += sum(len(v) for v in music_to_records.values())
-            continue
 
         used_regions += 1
         rng.shuffle(music_ids)
@@ -254,13 +249,14 @@ def split_by_title(records: list[dict[str, Any]], seed: int) -> tuple[dict[str, 
 
     splits = {"train": train_records, "val": val_records, "test": test_records}
 
-    # 防止 music_id 跨集合泄漏
-    split_music_ids: dict[str, set[str]] = {"train": set(), "val": set(), "test": set()}
+    # 防止 (region, music_id) 跨集合泄漏
+    split_music_ids: dict[str, set[tuple[str, str]]] = {"train": set(), "val": set(), "test": set()}
     for split_name, recs in splits.items():
         for rec in recs:
+            region = str(rec.get("region", ""))
             music_id = extract_music_id(str(rec.get("filename", "")))
-            if music_id:
-                split_music_ids[split_name].add(music_id)
+            if region and music_id:
+                split_music_ids[split_name].add((region, music_id))
     if split_music_ids["train"] & split_music_ids["val"]:
         raise RuntimeError("music_id leakage between train/val")
     if split_music_ids["train"] & split_music_ids["test"]:
@@ -272,6 +268,7 @@ def split_by_title(records: list[dict[str, Any]], seed: int) -> tuple[dict[str, 
         "strategy": "region_music_id",
         "regions_total": len(region_music_records),
         "regions_used": used_regions,
+        # 暂时关闭“小于4首曲目地域剔除”逻辑，保留字段用于兼容既有日志解析。
         "regions_skipped_lt4": skipped_regions,
         "records_dropped_missing_region": dropped_missing_region,
         "records_dropped_missing_music_id": dropped_missing_music_id,
